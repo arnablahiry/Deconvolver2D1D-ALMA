@@ -24,18 +24,20 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC_DIR = os.path.join(REPO_ROOT, "src")
+SIMPLE_DIR = os.path.join(REPO_ROOT, "simple")
 NOTEBOOKS_DIR = os.path.join(REPO_ROOT, "notebooks")
 
 
 class NotebookBuilder:
-    def __init__(self, out_path, chdir_to_notebooks=False):
+    def __init__(self, out_path, chdir_to_notebooks=False, kernel="python3"):
         """out_path: where to write the .ipynb (relative to REPO_ROOT or absolute).
         chdir_to_notebooks: run cells with cwd = notebooks/, matching a real
         Jupyter session started there -- needed when cell sources use paths
-        like '../data' relative to that directory."""
+        like '../data' relative to that directory.
+        kernel: Jupyter kernelspec name written into the notebook metadata."""
         self.out_path = out_path if os.path.isabs(out_path) else os.path.join(REPO_ROOT, out_path)
         self.chdir_to_notebooks = chdir_to_notebooks
+        self.kernel = kernel          # kernelspec name recorded in the notebook
         self.cells = []
 
     def md(self, text):
@@ -45,7 +47,7 @@ class NotebookBuilder:
         self.cells.append(("code", text))
 
     def build_and_execute(self):
-        sys.path.insert(0, SRC_DIR)
+        sys.path.insert(0, SIMPLE_DIR)
         if self.chdir_to_notebooks:
             os.makedirs(NOTEBOOKS_DIR, exist_ok=True)
             os.chdir(NOTEBOOKS_DIR)
@@ -117,7 +119,7 @@ class NotebookBuilder:
         notebook = {
             "cells": nb_cells,
             "metadata": {
-                "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+                "kernelspec": {"display_name": self.kernel, "language": "python", "name": self.kernel},
                 "language_info": {"name": "python", "version": sys.version.split()[0]},
             },
             "nbformat": 4,

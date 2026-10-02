@@ -26,7 +26,26 @@ starlet; lifting inverse for CDF 9/7) -- both are verified by the
 self-tests at the bottom of this file (`python simple/wavelets.py`).
 """
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
+
+
+# Threads for the independent per-channel / per-plane work below: numpy
+# releases the GIL inside these large array operations, so this parallelizes
+# with results bit-identical to a serial run. Env SIMPLE_NUM_THREADS overrides.
+NUM_THREADS = int(os.environ.get("SIMPLE_NUM_THREADS", 8))
+_pool = None
+
+
+def _map(fn, items):
+    global _pool
+    if NUM_THREADS <= 1:
+        return list(map(fn, items))
+    if _pool is None:
+        _pool = ThreadPoolExecutor(NUM_THREADS)
+    return list(_pool.map(fn, items))
 
 
 # ======================================================================
@@ -36,16 +55,20 @@ _B3_SPLINE = np.array([1.0, 4.0, 6.0, 4.0, 1.0]) / 16.0
 
 
 def _smooth_2d(plane, step):
-    """Separable convolution with the dyadically-dilated B3-spline kernel."""
+    """Separable convolution with the dyadically-dilated B3-spline kernel,
+    reflect boundaries. The 5 taps are read as slice views of one padded
+    copy per axis (no per-tap copies)."""
     out = plane
     for axis in (0, 1):
         n = out.shape[axis]
-        pad = 2 * step
-        idx = np.pad(np.arange(n), pad, mode="reflect")
-        padded = np.take(out, idx, axis=axis)
+        width = [(0, 0), (0, 0)]
+        width[axis] = (2 * step, 2 * step)
+        padded = np.pad(out, width, mode="reflect")
         acc = np.zeros_like(out)
         for k, w in enumerate(_B3_SPLINE):
-            acc = acc + w * np.take(padded, np.arange(n) + k * step, axis=axis)
+            window = [slice(None), slice(None)]
+            window[axis] = slice(k * step, k * step + n)
+            acc += w * padded[tuple(window)]
         out = acc
     return out
 
@@ -63,7 +86,12 @@ def starlet_2d_forward(cube, num_scales):
     coarse = cube.copy()
     for j in range(num_scales):
         step = 2 ** j
-        smoothed = np.stack([_smooth_2d(coarse[z], step) for z in range(nz)])
+        smoothed = np.empty_like(coarse)
+
+        def smooth_channel(z):
+            smoothed[z] = _smooth_2d(coarse[z], step)
+
+        _map(smooth_channel, range(nz))
         planes[j] = coarse - smoothed
         coarse = smoothed
     planes[num_scales] = coarse
@@ -89,17 +117,26 @@ _ZETA = 1.230174104914001
 
 def _lift(x, coeff, parity):
     """
-    One lifting step along axis 0: add coeff*(left neighbor + right
-    neighbor) to every sample of the given parity. Boundaries use
-    whole-sample symmetric reflection (numpy's `mode="reflect"`), the
-    standard extension for biorthogonal wavelets.
+    One lifting step along axis 0, IN PLACE on `x` (even length): add
+    coeff*(left neighbor + right neighbor) to every sample of the given
+    parity. Boundaries use whole-sample symmetric reflection (numpy's
+    `mode="reflect"`: x[-1] -> x[1], x[n] -> x[n-2]), the standard extension
+    for biorthogonal wavelets. The neighbours of one parity are all of the
+    other parity, which this step does not change -- so updating in place
+    is exact, and saves the pad + copy of the whole array a functional
+    version needs.
     """
-    padded = np.pad(x, [(1, 1)] + [(0, 0)] * (x.ndim - 1), mode="reflect")
-    left = padded[0:-2]     # left[i]  == x[i - 1] (reflected at the start)
-    right = padded[2:]      # right[i] == x[i + 1] (reflected at the end)
-    out = x.copy()
-    out[parity::2] += coeff * (left[parity::2] + right[parity::2])
-    return out
+    even, odd = x[0::2], x[1::2]
+    if parity == 1:                  # odd i: left = x[i-1], right = x[i+1]
+        pair = np.empty_like(even)
+        np.add(even[:-1], even[1:], out=pair[:-1])
+        np.add(even[-1:], even[-1:], out=pair[-1:])     # x[n] -> x[n-2]
+        odd += coeff * pair
+    else:                            # even i: left = x[i-1], right = x[i+1]
+        pair = np.empty_like(odd)
+        np.add(odd[:1], odd[:1], out=pair[:1])           # x[-1] -> x[1]
+        np.add(odd[:-1], odd[1:], out=pair[1:])
+        even += coeff * pair
 
 
 def _pad_to_even(x):
@@ -111,11 +148,13 @@ def _pad_to_even(x):
 
 def cdf97_forward_1level(x):
     """One level: (nz, ...) -> approx (ceil(nz/2), ...), detail (nz//2, ...)."""
-    x, _ = _pad_to_even(x)
-    x = _lift(x, _ALPHA, parity=1)     # predict odd samples from even neighbors
-    x = _lift(x, _BETA, parity=0)      # update even samples from odd neighbors
-    x = _lift(x, _GAMMA, parity=1)     # predict again (sharper high-pass)
-    x = _lift(x, _DELTA, parity=0)     # update again (smoother low-pass)
+    x, padded = _pad_to_even(x)
+    if not padded:
+        x = x.copy()                   # the lifting steps below work in place
+    _lift(x, _ALPHA, parity=1)         # predict odd samples from even neighbors
+    _lift(x, _BETA, parity=0)          # update even samples from odd neighbors
+    _lift(x, _GAMMA, parity=1)         # predict again (sharper high-pass)
+    _lift(x, _DELTA, parity=0)         # update again (smoother low-pass)
     approx = x[0::2] / _ZETA
     detail = x[1::2] * _ZETA
     return approx, detail
@@ -127,10 +166,10 @@ def cdf97_inverse_1level(approx, detail):
     x = np.empty((n,) + approx.shape[1:])
     x[0::2] = approx * _ZETA
     x[1::2] = detail / _ZETA
-    x = _lift(x, -_DELTA, parity=0)
-    x = _lift(x, -_GAMMA, parity=1)
-    x = _lift(x, -_BETA, parity=0)
-    x = _lift(x, -_ALPHA, parity=1)
+    _lift(x, -_DELTA, parity=0)
+    _lift(x, -_GAMMA, parity=1)
+    _lift(x, -_BETA, parity=0)
+    _lift(x, -_ALPHA, parity=1)
     return x
 
 
@@ -156,6 +195,20 @@ def cdf97_inverse(details, approx, orig_lens):
     return approx
 
 
+def max_scales_2d(ny, nx):
+    """Deepest starlet for a (ny, nx) image: scale j smooths with the B3
+    kernel dilated by 2**j, support 4 * 2**j + 1 pixels, which must still fit
+    inside the image (beyond that, reflect-padding just folds the image onto
+    itself). 800 px -> 8 scales, the last one 128-256 px."""
+    return int(np.floor(np.log2((min(ny, nx) - 1) / 4))) + 1
+
+
+def max_levels_1d(nz):
+    """Deepest CDF 9/7 decomposition of `nz` channels: halve (rounding up)
+    until the approximation is a single channel. 32 channels -> 5 levels."""
+    return max(1, int(np.ceil(np.log2(nz))))
+
+
 # ======================================================================
 # Combined 2D (spatial) x 1D (spectral) transform
 # ======================================================================
@@ -170,12 +223,12 @@ def analyze(cube, num_scales_2d, num_levels_1d):
     independently along the spectral axis.
     """
     planes = starlet_2d_forward(cube, num_scales_2d)
-    return [cdf97_forward(plane, num_levels_1d) for plane in planes]
+    return _map(lambda plane: cdf97_forward(plane, num_levels_1d), planes)
 
 
 def synthesize(coeffs):
     """Exact inverse of `analyze`."""
-    planes = np.stack([cdf97_inverse(*c) for c in coeffs])
+    planes = np.stack(_map(lambda c: cdf97_inverse(*c), coeffs))
     return starlet_2d_inverse(planes)
 
 
@@ -228,6 +281,108 @@ def _mad(a):
 
 
 # ======================================================================
+# Adjoints (transposes) of the forward transforms, for solvers that need
+# W^T -- e.g. the primal-dual solver in deconvolve_pd.py. These are NOT the
+# inverses above: the starlet and CDF 9/7 are redundant / biorthogonal, so
+# W^T != W^{-1}. Verified by the dot-product test at the bottom of this file.
+# ======================================================================
+def _smooth_1d_adjoint(y, step, axis):
+    """Transpose of one axis of `_smooth_2d`: scatter each tap back, then
+    fold the reflect-padded margins onto the samples they were copied from
+    (numpy "reflect": index -q -> q, index n-1+q -> n-1-q)."""
+    n = y.shape[axis]
+    p = 2 * step
+
+    def along(a, sl):
+        index = [slice(None)] * a.ndim
+        index[axis] = sl
+        return a[tuple(index)]
+
+    shape = list(y.shape)
+    shape[axis] = n + 2 * p
+    z = np.zeros(shape, dtype=y.dtype)
+    for k, w in enumerate(_B3_SPLINE):
+        along(z, slice(k * step, k * step + n))[...] += w * y
+    out = along(z, slice(p, p + n)).copy()
+    along(out, slice(1, p + 1))[...] += np.flip(along(z, slice(0, p)), axis=axis)
+    along(out, slice(n - 1 - p, n - 1))[...] += np.flip(along(z, slice(p + n, 2 * p + n)), axis=axis)
+    return out
+
+
+def _smooth_2d_adjoint(plane, step):
+    return _smooth_1d_adjoint(_smooth_1d_adjoint(plane, step, 1), step, 0)
+
+
+def starlet_2d_adjoint(planes):
+    """Transpose of `starlet_2d_forward`: (num_scales + 1, nz, ny, nx) -> (nz, ny, nx).
+    Forward: c_{j+1} = H_j c_j, w_j = c_j - c_{j+1}, coarse = c_J; so the
+    transpose runs back down the scales: g_j = w_j + H_j^T (g_{j+1} - w_j)."""
+    num_scales = planes.shape[0] - 1
+    g = planes[num_scales].copy()
+    for j in reversed(range(num_scales)):
+        step = 2 ** j
+        diff = g - planes[j]
+        smoothed = np.empty_like(diff)
+
+        def smooth_channel(z):
+            smoothed[z] = _smooth_2d_adjoint(diff[z], step)
+
+        _map(smooth_channel, range(diff.shape[0]))
+        g = planes[j] + smoothed
+    return g
+
+
+def _lift_adjoint(x, coeff, parity):
+    """Transpose of `_lift` (in place). `_lift(parity=1)` is odd += c P even,
+    so its transpose is even += c P^T odd, and vice versa for parity 0 --
+    with P, Q the reflect-boundary neighbour-sum matrices of `_lift`."""
+    even, odd = x[0::2], x[1::2]
+    m = even.shape[0]
+    if parity == 1:                  # even += c P^T odd;  P: (P e)[i] = e[i] + e[i+1], last = 2 e[m-1]
+        tr = odd.copy()              # the "e[i]" term of every row
+        if m > 1:
+            tr[1:] += odd[:-1]       # the "e[i+1]" term of row i lands on column i+1
+        tr[-1] += odd[-1]            # last row counts e[m-1] twice
+        even += coeff * tr
+    else:                            # odd += c Q^T even;  Q: (Q o)[0] = 2 o[0], (Q o)[i] = o[i-1] + o[i]
+        tr = even.copy()             # the "o[i]" term
+        if m > 1:
+            tr[:-1] += even[1:]      # the "o[i-1]" term of row i lands on column i-1
+        tr[0] += even[0]             # row 0 counts o[0] twice
+        odd += coeff * tr
+
+
+def cdf97_adjoint_1level(approx, detail, orig_len):
+    """Transpose of `cdf97_forward_1level` for an input of length `orig_len`."""
+    n = approx.shape[0] + detail.shape[0]
+    x = np.empty((n,) + approx.shape[1:], dtype=approx.dtype)
+    x[0::2] = approx / _ZETA
+    x[1::2] = detail * _ZETA
+    _lift_adjoint(x, _DELTA, parity=0)
+    _lift_adjoint(x, _GAMMA, parity=1)
+    _lift_adjoint(x, _BETA, parity=0)
+    _lift_adjoint(x, _ALPHA, parity=1)
+    if orig_len == n:
+        return x
+    out = x[:orig_len].copy()        # undo _pad_to_even: x[n-1] was a copy of x[orig_len - 2]
+    out[max(orig_len - 2, 0)] += x[orig_len]
+    return out
+
+
+def cdf97_adjoint(details, approx, orig_lens):
+    """Transpose of `cdf97_forward`."""
+    for detail, orig_len in zip(reversed(details), reversed(orig_lens)):
+        approx = cdf97_adjoint_1level(approx, detail, orig_len)
+    return approx
+
+
+def analyze_adjoint(coeffs):
+    """Transpose W^T of `analyze` (W): coefficients -> cube."""
+    planes = np.stack(_map(lambda c: cdf97_adjoint(*c), coeffs))
+    return starlet_2d_adjoint(planes)
+
+
+# ======================================================================
 # Self-tests: run this file directly to verify perfect reconstruction.
 # ======================================================================
 if __name__ == "__main__":
@@ -242,3 +397,12 @@ if __name__ == "__main__":
     coeffs = analyze(cube, num_scales_2d=4, num_levels_1d=3)
     cube_rec = synthesize(coeffs)
     print(f"2D-1D round trip: max err = {np.abs(cube - cube_rec).max():.2e}")
+
+    # dot-product test of the adjoints: <W x, u> == <x, W^T u>
+    for shape, J, L in (((16, 40, 40), 3, 4), ((33, 64, 48), 4, 6), ((1, 21, 21), 2, 1)):
+        xx = rng.normal(size=shape)
+        wx = analyze(xx, J, L)
+        u = [([rng.normal(size=d.shape) for d in det], rng.normal(size=ap.shape), ol) for det, ap, ol in wx]
+        lhs = sum((d * e).sum() for (dw, aw, _), (du, au, _) in zip(wx, u) for d, e in zip(dw + [aw], du + [au]))
+        rhs = (xx * analyze_adjoint(u)).sum()
+        print(f"adjoint dot-product test {shape} J={J} L={L}: relative mismatch {abs(lhs - rhs) / abs(lhs):.1e}")

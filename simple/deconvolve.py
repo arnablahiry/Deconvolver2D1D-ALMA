@@ -69,7 +69,8 @@ Two genuinely different reasons, and only one of them is a defect:
 import numpy as np
 
 from uv_to_image import ShiftInvariantOperator
-from wavelets import analyze, synthesize, soft_threshold_all, mad_sigma
+from wavelets import (analyze, synthesize, soft_threshold_all, mad_sigma,
+                      max_scales_2d, max_levels_1d, starlet_2d_forward)
 
 
 # ---------------------------------------------------------------- config --
@@ -77,11 +78,12 @@ PSF_PATH = "simple/data/psf.npy"
 DIRTY_PATH = "simple/data/dirty.npy"
 OUT_PATH = "simple/data/model.npy"
 
-NUM_SCALES_2D = 4        # spatial starlet detail scales
-NUM_LEVELS_1D = 3         # spectral CDF-9/7 decomposition levels
+NUM_SCALES_2D = None      # spatial starlet detail scales; None = deepest for the cube
+NUM_LEVELS_1D = None      # spectral CDF-9/7 levels; None = deepest for the cube
 N_ITER = 60
 K_SIGMA = 4.0             # detection threshold, in units of the noise sigma
 BURN_IN_ITERS = 20        # plain soft-threshold iterations before reweighting
+REWEIGHT = True           # reweighted L1 after BURN_IN_ITERS (False: plain soft-thresholding throughout)
 REWEIGHT_EPS = 1e-2       # reweighting floor (see module docstring, part 2)
 POSITIVITY = True         # project the model to x >= 0 every iteration
 
@@ -96,7 +98,30 @@ POSITIVITY = True         # project the model to x >= 0 every iteration
 USE_EXACT_OPERATOR = False
 
 
-def keep_coarsest_band(psf, lipschitz):
+def real_noise_ratios(dirty, noise_channels, num_scales_2d, seed=0):
+    """
+    How much stronger the REAL noise is than white noise of the same pixel
+    sigma, per 2D starlet scale: MAD of each spatial plane of the line-free
+    `noise_channels` (per-pixel mean over those channels removed, i.e. the
+    spectrally flat continuum), divided by the same for white noise.
+
+    Real interferometric noise is correlated: measured on these cubes it is
+    10-60x (extended) and up to 200x (compact) above white at 0.3-5" scales
+    -- and noise shaped from the PSF's power spectrum alone still falls short
+    of the real large-scale noise by ~1.5-4x (extended). Thresholds that
+    miss this let that noise through as diffuse "emission". Returns one ratio
+    per spatial plane (num_scales_2d details + coarse).
+    """
+    noise = dirty[list(noise_channels)]
+    noise = noise - noise.mean(axis=0, keepdims=True)
+    s_pix = 1.4826 * float(np.median(np.abs(noise - np.median(noise))))
+    white = np.random.default_rng(seed).normal(0.0, s_pix, noise.shape)
+    mad = lambda a: float(np.median(np.abs(a - np.median(a))))
+    return [mad(a) / mad(b) for a, b in zip(starlet_2d_forward(noise, num_scales_2d),
+                                            starlet_2d_forward(white, num_scales_2d))]
+
+
+def keep_coarsest_band(psf, lipschitz, log=print):
     """
     Should the very coarsest wavelet sub-band (smoothest in both space and
     spectrum) be zeroed instead of fit?
@@ -111,8 +136,8 @@ def keep_coarsest_band(psf, lipschitz):
     """
     dc_response = np.abs(psf.sum(axis=(1, 2))).max()
     measured = dc_response > 1e-3 * lipschitz
-    print(f"[setup] zero-spacing response |sum(PSF)| = {dc_response:.2f} "
-          f"({'MEASURED -> keep coarsest band' if measured else 'ZERO -> drop coarsest band'})")
+    log(f"[setup] zero-spacing response |sum(PSF)| = {dc_response:.2f} "
+        f"({'MEASURED -> keep coarsest band' if measured else 'ZERO -> drop coarsest band'})")
     return not measured
 
 
@@ -125,7 +150,6 @@ def main():
     # exact operator, whose true constant would cost ~20 major cycles to
     # measure directly) and the zero-spacing check either way.
     fast_operator = ShiftInvariantOperator(psf, dirty)
-    keep_coarsest = keep_coarsest_band(psf, fast_operator.lipschitz)
 
     if USE_EXACT_OPERATOR:
         from exact_operator import ExactOperator
@@ -137,76 +161,8 @@ def main():
         print("[setup] using the FAST operator: PSF convolution via FFT "
               "(instant, exact for a single pointing, ~0.55% rms off at "
               "this mosaic's edge)")
-    step_size = 1.0 / operator.lipschitz
 
-    # Noise level per wavelet sub-band, estimated ONCE from the dirty image
-    # itself and held fixed for the whole run. Re-estimating it every
-    # iteration from the shrinking residual (tempting, and what the
-    # `uv_deconvolver.py` version of this pipeline originally did) is
-    # degenerate: as the fit improves the residual shrinks, so the
-    # threshold shrinks, so more coefficients pass, so the residual shrinks
-    # further -- a runaway whose fixed point is fitting pure noise. Fixing
-    # the threshold to the data's own noise level (computed here, from the
-    # dirty image, before any fitting) removes that runaway.
-    # NOTE the `step_size *` here: thresholds are compared against `v = z -
-    # step_size * grad` every iteration (see the loop below), which is
-    # `step_size` times smaller than the raw dirty image. Estimating sigma
-    # from `dirty` directly instead of `step_size * dirty` makes every
-    # threshold ~1/step_size too large -- everything gets zeroed on
-    # iteration 0, x never leaves zero, and the loop silently does nothing
-    # forever (residual_rms flat, active=0, every iteration identical).
-    noise_coeffs = analyze(step_size * dirty, NUM_SCALES_2D, NUM_LEVELS_1D)
-    sigma = mad_sigma(noise_coeffs)                      # sigma[j2][l]
-    thresholds = [[K_SIGMA * s for s in levels] for levels in sigma]
-
-    x = np.zeros_like(dirty)          # the model, Jy/pixel
-    z = x.copy()                      # FISTA's momentum variable
-    t = 1.0
-    prev_coeffs = None                # for reweighting: previous model's coefficients
-
-    for it in range(N_ITER):
-        # --- 1. gradient step on the smooth data term ---------------------
-        grad = operator.gradient(z)              # N(z) - dirty
-        v = z - step_size * grad
-        residual = -grad                          # dirty - N(z), for diagnostics
-
-        # --- 2. proximal step: analyze, threshold, synthesize -------------
-        coeffs = analyze(v, NUM_SCALES_2D, NUM_LEVELS_1D)
-        if it >= BURN_IN_ITERS:
-            # reweighted thresholds: T / (|prev coeff| / T + eps), per
-            # sub-band, computed against last iteration's model
-            rw_thresholds = []
-            for j2, (details, approx, _) in enumerate(coeffs):
-                p_details, p_approx, _ = prev_coeffs[j2]
-                levels = []
-                for l, (T, p) in enumerate(zip(thresholds[j2][:-1], p_details)):
-                    levels.append(T / (np.abs(p) / T + REWEIGHT_EPS))
-                T = thresholds[j2][-1]
-                levels.append(T / (np.abs(p_approx) / T + REWEIGHT_EPS))
-                rw_thresholds.append(levels)
-            new_coeffs = _soft_threshold_reweighted(coeffs, rw_thresholds, keep_coarsest)
-        else:
-            new_coeffs = soft_threshold_all(coeffs, thresholds, keep_coarsest)
-
-        x_new = synthesize(new_coeffs)
-        if POSITIVITY:
-            np.maximum(x_new, 0.0, out=x_new)
-        prev_coeffs = analyze(x_new, NUM_SCALES_2D, NUM_LEVELS_1D)
-
-        # --- 3. FISTA momentum ---------------------------------------------
-        t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t * t))
-        z = x_new + ((t - 1.0) / t_new) * (x_new - x)
-        x, t = x_new, t_new
-
-        if it % 5 == 0 or it == N_ITER - 1:
-            # Reuse `residual` (= dirty - N(z), already computed this
-            # iteration for free) instead of a fresh `operator.apply(x)`
-            # call -- for the exact operator that would be one extra
-            # ~60-140s CASA major cycle per printout, purely for a diagnostic.
-            peak_ratio = (dirty - residual).max() / dirty.max()
-            print(f"iter {it:3d}  residual_rms={residual.std():.4e}  "
-                  f"flux={x.sum():8.2f} Jy  active={np.count_nonzero(x)}  "
-                  f"N(model)/dirty peak={peak_ratio:.3f}")
+    x, _ = deconvolve(psf, dirty, operator=operator)
 
     if USE_EXACT_OPERATOR:
         operator.done()
@@ -215,6 +171,155 @@ def main():
     print(f"\nsaved {OUT_PATH}, shape {x.shape}")
     print(f"model is in Jy/pixel; N(model) [= model convolved with the PSF, "
           f"in Jy/beam] should closely match dirty.npy if the fit converged")
+
+
+def deconvolve(psf, dirty, operator=None, n_iter=N_ITER, k_sigma=K_SIGMA,
+               num_scales_2d=NUM_SCALES_2D, num_levels_1d=NUM_LEVELS_1D,
+               reweight=REWEIGHT, burn_in_iters=BURN_IN_ITERS, reweight_eps=REWEIGHT_EPS,
+               positivity=POSITIVITY, noise_channels=None, max_scale_px=None,
+               verbose=True, print_every=5, log=print, label=""):
+    """
+    The solver loop on in-memory cubes: `psf` and `dirty`, both (nz, ny, nx),
+    PSF peak-normalized with its peak at the same pixel in every channel.
+    `operator` defaults to the fast `ShiftInvariantOperator(psf, dirty)`.
+
+    With `verbose`, the setup and every `print_every`-th iteration are sent
+    to `log` (default print), each line prefixed by `label` -- e.g. a
+    queue's `put` to stream progress out of a worker process.
+
+    Returns (x, history): the model cube in Jy/pixel, and one dict per
+    iteration with the diagnostics.
+    """
+    def say(msg):
+        if verbose:
+            log(f"{label}{msg}")
+
+    if operator is None:
+        operator = ShiftInvariantOperator(psf, dirty)
+    keep_coarsest = keep_coarsest_band(psf, operator.lipschitz, log=say)
+    step_size = 1.0 / operator.lipschitz
+    nz, ny, nx = dirty.shape
+    if num_scales_2d is None:
+        num_scales_2d = max_scales_2d(ny, nx)
+    if num_levels_1d is None:
+        num_levels_1d = max_levels_1d(nz)
+
+    # Largest recoverable scale: with `max_scale_px` (the array's LRS, in
+    # pixels), every starlet plane whose central scale 2**(j + 1/2) px lies
+    # beyond it -- and the coarse plane, centred at 2**(J + 1/2) -- is ZEROED
+    # every iteration, not thresholded. The data measure nothing there (no
+    # baselines short enough), so any flux in those planes is prior-made; and
+    # soft-thresholding them is worse than useless: it removes their weak
+    # negative lobes and leaves a smooth positive halo/plateau. The planes
+    # that remain are zero-mean band-passes, which cannot build a pedestal.
+    dropped = [False] * (num_scales_2d + 1)
+    if max_scale_px is not None:
+        dropped = [2 ** (j + 0.5) > max_scale_px for j in range(num_scales_2d + 1)]
+
+    # Thresholds are fixed ONCE, before any fitting. Re-estimating them every
+    # iteration from the shrinking residual is degenerate: as the fit
+    # improves the residual shrinks, so the threshold shrinks, so more
+    # coefficients pass, so the residual shrinks further -- a runaway whose
+    # fixed point is fitting pure noise.
+    #
+    # Threshold of sub-band b = k_sigma * sigma_img * ||psi_b||: the
+    # image-domain noise level of the gradient step, times that sub-band's
+    # response to WHITE noise of unit variance -- i.e. one uniform lambda
+    # (k_sigma * sigma_img) on the normalized dictionary.
+    #
+    # NOT each sub-band's own MAD of the dirty cube, which this solver used
+    # to do and which fails both ways at once (measured on a ground-truth
+    # simulation with the real NGC 3110 compact PSF: 24 sigma residuals AND
+    # 10x the true fine-scale energy):
+    #   * in sub-bands the PSF does not sample, the dirty cube has ~no power,
+    #     so the threshold was ~0 exactly where the data constrain nothing --
+    #     anything the iteration put there (positivity-clipping edges,
+    #     momentum overshoot) was never removed: contour-like arcs and knots;
+    #   * in sub-bands the source dominates, the MAD measures the source, not
+    #     the noise, so thresholds were inflated and real flux was withheld.
+    # sigma_img is robust (MAD) over the whole cube, where the source fills
+    # few voxels. `step_size *` because thresholds are compared against
+    # `v = z - step_size * grad`, i.e. step_size times the dirty cube's units.
+    sigma_img = step_size * 1.4826 * np.median(np.abs(dirty - np.median(dirty)))
+    white = np.random.default_rng(0).normal(0.0, sigma_img, dirty.shape)
+    sigma = mad_sigma(analyze(white, num_scales_2d, num_levels_1d))   # sigma[j2][l]
+    del white
+    # With line-free `noise_channels`: raise each spatial scale's thresholds
+    # to the REAL noise there (never below the white floor).
+    if noise_channels is not None:
+        ratios = real_noise_ratios(dirty, noise_channels, num_scales_2d)
+        sigma = [[s * max(1.0, r) for s in levels] for levels, r in zip(sigma, ratios)]
+        say(f"[setup] real/white noise per spatial scale (from {len(noise_channels)} line-free "
+            f"channels): " + " ".join(f"{r:.1f}" for r in ratios))
+    thresholds = [[k_sigma * s for s in levels] for levels in sigma]
+    if any(dropped):
+        say(f"[setup] largest recoverable scale {max_scale_px:.0f} px: spatial planes "
+            f"{[j for j, d in enumerate(dropped) if d]} zeroed (of 0..{num_scales_2d}, {num_scales_2d} = coarse)")
+    say(f"[setup] {num_scales_2d} starlet scales x {num_levels_1d} CDF 9/7 levels; "
+        f"step 1/L = {step_size:.3e}; image noise (step units) = {sigma_img:.3e}; "
+        f"thresholds {k_sigma} sigma: {min(min(l) for l in thresholds):.2e} .. "
+        f"{max(max(l) for l in thresholds):.2e}; {n_iter} iterations, reweighting "
+        f"{f'from iteration {burn_in_iters}' if reweight else 'off'}, positivity={positivity}")
+
+    x = np.zeros_like(dirty)          # the model, Jy/pixel
+    z = x.copy()                      # FISTA's momentum variable
+    t = 1.0
+    prev_coeffs = None                # for reweighting: previous model's coefficients
+    history = []
+
+    for it in range(n_iter):
+        # --- 1. gradient step on the smooth data term ---------------------
+        grad = operator.gradient(z)              # N(z) - dirty
+        v = z - step_size * grad
+        residual = -grad                          # dirty - N(z), for diagnostics
+
+        # --- 2. proximal step: analyze, threshold, synthesize -------------
+        coeffs = analyze(v, num_scales_2d, num_levels_1d)
+        if reweight and it >= burn_in_iters:
+            # reweighted thresholds: T / (|prev coeff| / T + eps), per
+            # sub-band, computed against last iteration's model
+            rw_thresholds = []
+            for j2, (details, approx, _) in enumerate(coeffs):
+                p_details, p_approx, _ = prev_coeffs[j2]
+                levels = []
+                for l, (T, p) in enumerate(zip(thresholds[j2][:-1], p_details)):
+                    levels.append(T / (np.abs(p) / T + reweight_eps))
+                T = thresholds[j2][-1]
+                levels.append(T / (np.abs(p_approx) / T + reweight_eps))
+                rw_thresholds.append(levels)
+            new_coeffs = _soft_threshold_reweighted(coeffs, rw_thresholds, keep_coarsest)
+        else:
+            new_coeffs = soft_threshold_all(coeffs, thresholds, keep_coarsest)
+
+        for j2, drop in enumerate(dropped):
+            if drop:
+                det, ap, ol = new_coeffs[j2]
+                new_coeffs[j2] = ([np.zeros_like(d) for d in det], np.zeros_like(ap), ol)
+        x_new = synthesize(new_coeffs)
+        if positivity:
+            np.maximum(x_new, 0.0, out=x_new)
+        if reweight:              # only reweighting needs the model's own coefficients
+            prev_coeffs = analyze(x_new, num_scales_2d, num_levels_1d)
+
+        # --- 3. FISTA momentum ---------------------------------------------
+        t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t * t))
+        z = x_new + ((t - 1.0) / t_new) * (x_new - x)
+        x, t = x_new, t_new
+
+        # Reuse `residual` (= dirty - N(z), already computed this iteration
+        # for free) instead of a fresh `operator.apply(x)` call -- for the
+        # exact operator that would be one extra ~60-140s CASA major cycle
+        # per iteration, purely for a diagnostic.
+        peak_ratio = (dirty - residual).max() / dirty.max()
+        history.append(dict(iter=it, residual_rms=float(residual.std()),
+                            flux=float(x.sum()), active=int(np.count_nonzero(x)),
+                            peak_ratio=float(peak_ratio)))
+        if it % print_every == 0 or it == n_iter - 1:
+            say(f"iter {it:3d}  residual_rms={residual.std():.4e}  "
+                f"flux={x.sum():8.2f} Jy  active={np.count_nonzero(x)}  "
+                f"N(model)/dirty peak={peak_ratio:.3f}")
+
+    return x, history
 
 
 def _soft_threshold_reweighted(coeffs, rw_thresholds, keep_coarsest):

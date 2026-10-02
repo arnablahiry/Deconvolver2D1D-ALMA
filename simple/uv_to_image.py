@@ -129,13 +129,25 @@ class ShiftInvariantOperator:
     so the *linear* convolution with the PSF is exact -- an un-padded FFT
     convolution is circular and would wrap the PSF's sidelobes around the
     edges of the field.
+
+    The PSF may be LARGER than the image, and should be twice its size
+    (CASA's convention): for a sky inside the (ny, nx) field the convolution
+    needs every PSF lag up to +-(ny, nx), so a PSF of only the image's size
+    is truncated at half of them. That truncation is not harmless: it rings
+    the transfer function negative (measured: the 16" extended PSFs here go
+    down to -25..-30% of the peak over ~40% of frequencies), which makes
+    N indefinite -- the data term then has no minimum and a solver can run
+    away along those directions. With the 2x PSF the convolution restricted
+    to the field is exact, hence positive semi-definite like the true
+    A^H W A. `psf` must be centred on its own peak pixel either way.
     """
 
     def __init__(self, psf, dirty_image, pad=2.0):
         psf = np.asarray(psf, dtype=np.float64)
         dirty_image = np.asarray(dirty_image, dtype=np.float64)
-        assert psf.shape == dirty_image.shape
-        self.nz, self.ny, self.nx = psf.shape
+        assert psf.shape[0] == dirty_image.shape[0]
+        assert psf.shape[1] >= dirty_image.shape[1] and psf.shape[2] >= dirty_image.shape[2]
+        self.nz, self.ny, self.nx = dirty_image.shape
         self.dirty_image = dirty_image
 
         # Re-normalize the PSF to peak exactly 1.0 per channel: that peak
@@ -144,20 +156,23 @@ class ShiftInvariantOperator:
         peak = psf.max(axis=(1, 2), keepdims=True)
         self.psf = psf / peak
 
-        self.pad_y = next_fast_len(int(self.ny * pad), real=True)
-        self.pad_x = next_fast_len(int(self.nx * pad), real=True)
+        # FFT grid: at least 2x the image (linear, not circular, convolution)
+        # and at least the PSF's own size.
+        psf_ny, psf_nx = self.psf.shape[1:]
+        self.pad_y = next_fast_len(max(int(self.ny * pad), psf_ny), real=True)
+        self.pad_x = next_fast_len(max(int(self.nx * pad), psf_nx), real=True)
 
         # Move the PSF's peak to pixel (0, 0) before transforming, so that
         # convolving with it introduces no spatial shift.
         py, px = np.unravel_index(np.argmax(self.psf[0]), self.psf[0].shape)
         big_psf = np.zeros((self.nz, self.pad_y, self.pad_x))
-        big_psf[:, : self.ny, : self.nx] = self.psf
+        big_psf[:, :psf_ny, :psf_nx] = self.psf
         big_psf = np.roll(big_psf, (-py, -px), axis=(1, 2))
         self.otf = image_to_uv(big_psf)
 
-        # max|OTF| is the exact Lipschitz constant of N -- since N is a pure
-        # convolution, its eigenvalues ARE the OTF values, no power
-        # iteration needed.
+        # max|OTF| is the Lipschitz constant of N -- exactly, for the
+        # periodic convolution's eigenvalues are the OTF values; an upper
+        # bound for the convolution restricted to the field.
         self.lipschitz = float(np.abs(self.otf).max())
 
     def apply(self, x):

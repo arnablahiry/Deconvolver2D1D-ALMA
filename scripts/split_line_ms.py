@@ -41,7 +41,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "simple"))
 
 # Frequency window kept, generous enough to leave line-free channels at both
 # edges for noise estimation (the line itself spans ~226.74-226.90 GHz).
@@ -148,6 +148,8 @@ def report(msname):
 
 
 def main(argv=None):
+    from casa_logs import redirect_casa_logs
+    redirect_casa_logs("split_line_ms.log")
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--vis", default="data/calibrated_final.ms.contsub")

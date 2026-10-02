@@ -13,13 +13,28 @@ data/*
 # macOS
 .DS_Store
 
-# CASA writes a timestamped log into the working directory on every run
+# CASA writes a timestamped log into the working directory on every run --
+# every casatools entry point in this repo redirects it into casa_logs/
 casa-*.log
+casa_logs/
 *.last
 
 # Pipeline outputs (CASA image directories, cached grids, FITS cubes)
 results/
 results_previous/
 
-# Legacy CASA image dirs kept alongside the old prototype scripts
-legacy/simple/data/
+# CASA image dirs + .npy cubes written by simple/grid_with_casa.py
+simple/data/
+
+# experiment logs
+logs/
+
+*.png
+*.pdf
+*.gif
+
+# CASA scratch lattices (~1 GB each) left behind in the working directory
+TempLattice*/
+
+# download logs
+*_dl.log
