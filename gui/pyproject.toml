@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deconvgui"
+version = "0.1.0"
+description = "Local browser GUI for the 2D-1D wavelet deconvolution in Deconvolver2D1D-ALMA"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "pillow",
+    "astropy",
+    "fastapi>=0.100",
+    "uvicorn>=0.22",
+]
+
+[project.optional-dependencies]
+# CASA is only needed for "Load MS" (inspection + dirty imaging). The rest of
+# the app (importing existing psf/dirty cubes, deconvolution, analysis) runs
+# without it.
+casa = ["casatools", "casatasks"]
+# The PyTorch solver (simple/gpu_pd.py) on CPU, CUDA or Apple MPS.
+gpu = ["torch"]
+
+[project.scripts]
+deconvgui = "deconvgui.__main__:main"
+
+[tool.setuptools]
+packages = ["deconvgui"]
+
+[tool.setuptools.package-data]
+deconvgui = ["static/*"]

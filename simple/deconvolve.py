@@ -69,7 +69,7 @@ Two genuinely different reasons, and only one of them is a defect:
 import numpy as np
 
 from uv_to_image import ShiftInvariantOperator
-from wavelets import (analyze, synthesize, soft_threshold_all, mad_sigma,
+from wavelets import (analyze, synthesize, soft_threshold_all, mad_sigma, _mad,
                       max_scales_2d, max_levels_1d, starlet_2d_forward)
 
 
@@ -86,6 +86,25 @@ BURN_IN_ITERS = 20        # plain soft-threshold iterations before reweighting
 REWEIGHT = True           # reweighted L1 after BURN_IN_ITERS (False: plain soft-thresholding throughout)
 REWEIGHT_EPS = 1e-2       # reweighting floor (see module docstring, part 2)
 POSITIVITY = True         # project the model to x >= 0 every iteration
+
+# Which reweighting to use once BURN_IN_ITERS is passed:
+#   "threshold"  -- fold the weight into the threshold (original; debiases
+#                   well but loosens detection, which rings on noiseless data)
+#   "bias-only"  -- keep detection at the plain K_SIGMA threshold and reweight
+#                   only the shrinkage (see _soft_threshold_bias_corrected)
+#   "off"        -- plain soft-thresholding throughout
+REWEIGHT_MODE = "threshold"
+
+# Extra unpenalized gradient steps after the main loop, restricted to the
+# FIXED support the main loop converged to (x > 0 at the last iteration).
+# This removes L1 shrinkage bias -- the same problem reweighting is for --
+# without either of reweighting's failure modes: it cannot admit new
+# coefficients (the support is frozen, taken from whichever run this follows,
+# reweighted or not), so it cannot ring on a noiseless or low-S/N problem the
+# way reweighting does. It also cannot fix a support that was wrong to begin
+# with -- run this after a clean (e.g. non-reweighted) main loop, not instead
+# of getting detection right. 0 = off (default; existing behaviour unchanged).
+DEBIAS_ITERS = 0
 
 # The exact operator (exact_operator.ExactOperator) computes the gradient on
 # the REAL visibility residual, `Vis - A(x)`, via one CASA degrid+grid pass
@@ -162,7 +181,14 @@ def main():
               "(instant, exact for a single pointing, ~0.55% rms off at "
               "this mosaic's edge)")
 
-    x, _ = deconvolve(psf, dirty, operator=operator)
+    # Pass the module globals explicitly: deconvolve()'s defaults are bound at
+    # import time, so callers that set e.g. `deconvolve.K_SIGMA` and then call
+    # main() would otherwise be silently ignored.
+    x, _ = deconvolve(psf, dirty, operator=operator, n_iter=N_ITER, k_sigma=K_SIGMA,
+                      num_scales_2d=NUM_SCALES_2D, num_levels_1d=NUM_LEVELS_1D,
+                      reweight=REWEIGHT, reweight_mode=REWEIGHT_MODE,
+                      burn_in_iters=BURN_IN_ITERS, reweight_eps=REWEIGHT_EPS,
+                      positivity=POSITIVITY, debias_iters=DEBIAS_ITERS)
 
     if USE_EXACT_OPERATOR:
         operator.done()
@@ -175,9 +201,9 @@ def main():
 
 def deconvolve(psf, dirty, operator=None, n_iter=N_ITER, k_sigma=K_SIGMA,
                num_scales_2d=NUM_SCALES_2D, num_levels_1d=NUM_LEVELS_1D,
-               reweight=REWEIGHT, burn_in_iters=BURN_IN_ITERS, reweight_eps=REWEIGHT_EPS,
+               reweight=REWEIGHT, reweight_mode=REWEIGHT_MODE, burn_in_iters=BURN_IN_ITERS, reweight_eps=REWEIGHT_EPS,
                positivity=POSITIVITY, noise_channels=None, max_scale_px=None,
-               verbose=True, print_every=5, log=print, label=""):
+               debias_iters=DEBIAS_ITERS, verbose=True, print_every=5, log=print, label=""):
     """
     The solver loop on in-memory cubes: `psf` and `dirty`, both (nz, ny, nx),
     PSF peak-normalized with its peak at the same pixel in every channel.
@@ -186,6 +212,10 @@ def deconvolve(psf, dirty, operator=None, n_iter=N_ITER, k_sigma=K_SIGMA,
     With `verbose`, the setup and every `print_every`-th iteration are sent
     to `log` (default print), each line prefixed by `label` -- e.g. a
     queue's `put` to stream progress out of a worker process.
+
+    `reweight_mode` picks the reweighting once `burn_in_iters` is passed (see
+    REWEIGHT_MODE); `debias_iters` > 0 runs the fixed-support amplitude refit
+    after the main loop (see DEBIAS_ITERS).
 
     Returns (x, history): the model cube in Jy/pixel, and one dict per
     iteration with the diagnostics.
@@ -203,6 +233,9 @@ def deconvolve(psf, dirty, operator=None, n_iter=N_ITER, k_sigma=K_SIGMA,
         num_scales_2d = max_scales_2d(ny, nx)
     if num_levels_1d is None:
         num_levels_1d = max_levels_1d(nz)
+    if reweight_mode not in ("threshold", "bias-only", "off"):
+        raise ValueError(f"reweight_mode must be 'threshold', 'bias-only' or 'off', got {reweight_mode!r}")
+    reweight = reweight and reweight_mode != "off"
 
     # Largest recoverable scale: with `max_scale_px` (the array's LRS, in
     # pixels), every starlet plane whose central scale 2**(j + 1/2) px lies
@@ -259,7 +292,7 @@ def deconvolve(psf, dirty, operator=None, n_iter=N_ITER, k_sigma=K_SIGMA,
         f"step 1/L = {step_size:.3e}; image noise (step units) = {sigma_img:.3e}; "
         f"thresholds {k_sigma} sigma: {min(min(l) for l in thresholds):.2e} .. "
         f"{max(max(l) for l in thresholds):.2e}; {n_iter} iterations, reweighting "
-        f"{f'from iteration {burn_in_iters}' if reweight else 'off'}, positivity={positivity}")
+        f"{f'{reweight_mode} from iteration {burn_in_iters}' if reweight else 'off'}, positivity={positivity}")
 
     x = np.zeros_like(dirty)          # the model, Jy/pixel
     z = x.copy()                      # FISTA's momentum variable
@@ -275,7 +308,10 @@ def deconvolve(psf, dirty, operator=None, n_iter=N_ITER, k_sigma=K_SIGMA,
 
         # --- 2. proximal step: analyze, threshold, synthesize -------------
         coeffs = analyze(v, num_scales_2d, num_levels_1d)
-        if reweight and it >= burn_in_iters:
+        if reweight and it >= burn_in_iters and reweight_mode == "bias-only":
+            new_coeffs = _soft_threshold_bias_corrected(
+                coeffs, thresholds, prev_coeffs, keep_coarsest, k_sigma)
+        elif reweight and it >= burn_in_iters:
             # reweighted thresholds: T / (|prev coeff| / T + eps), per
             # sub-band, computed against last iteration's model
             rw_thresholds = []
@@ -319,7 +355,86 @@ def deconvolve(psf, dirty, operator=None, n_iter=N_ITER, k_sigma=K_SIGMA,
                 f"flux={x.sum():8.2f} Jy  active={np.count_nonzero(x)}  "
                 f"N(model)/dirty peak={peak_ratio:.3f}")
 
+    if debias_iters > 0:
+        support = x > 0
+        say(f"[debias] refitting amplitudes on the fixed {np.count_nonzero(support)}-pixel "
+              f"support with no L1 penalty, {debias_iters} unpenalized (accelerated) "
+              f"gradient steps")
+        x_d, z_d, t_d = x.copy(), x.copy(), 1.0
+        for it in range(debias_iters):
+            grad = operator.gradient(z_d)
+            x_new = z_d - step_size * grad
+            x_new[~support] = 0.0                 # support frozen: no new pixels can appear
+            if positivity:
+                np.maximum(x_new, 0.0, out=x_new)
+            t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_d * t_d))
+            z_d = x_new + ((t_d - 1.0) / t_new) * (x_new - x_d)
+            x_d, t_d = x_new, t_new
+            if it % 5 == 0 or it == debias_iters - 1:
+                pred = operator.apply(x_d)
+                say(f"[debias] iter {it:3d}  residual_rms={(dirty - pred).std():.4e}  "
+                      f"flux={x_d.sum():8.2f} Jy  N(model)/dirty peak={pred.max() / dirty.max():.3f}")
+        x = x_d
+
+
     return x, history
+
+
+def _soft_threshold_bias_corrected(coeffs, thresholds, prev_coeffs, keep_coarsest,
+                                   k_sigma=K_SIGMA):
+    """
+    Reweighting that removes the L1 shrinkage bias WITHOUT loosening detection.
+
+    The scheme above (`_soft_threshold_reweighted`) folds the weight into the
+    threshold itself, so a large previous coefficient both shrinks less *and*
+    gates less -- the solver can then admit structure the plain threshold
+    would have rejected. On a noiseless, sub-beam problem that is what
+    produces high-frequency ringing (measured on the FIRE cube: 3.5x the
+    truth's sub-beam power, vs 1.2x with reweighting off).
+
+    This variant, following the iterative-soft scheme in
+    `Denoiser3D-IFU/src/wavelet_denoising.py::_denoise_iterative_soft`, keeps
+    the two jobs separate:
+
+        mask   = |c| > T                            (selection: plain T)
+        w      = k_sigma * s_p / (|p| + s_p * 1e-6) (s_p = MAD noise of the
+                                                     previous model's band)
+        out    = sign(c) * max(|c| - w * T, 0)  where mask, else 0
+
+    so which coefficients survive is unchanged, and only the amount
+    subtracted from the survivors shrinks as the model grows. The epsilon is
+    scaled to the sub-band's own noise so near-zero coefficients cannot blow
+    the weight up arbitrarily.
+    """
+    out = []
+    n2 = len(coeffs)
+    for j2, (details, approx, orig_lens) in enumerate(coeffs):
+        p_details, p_approx, _ = prev_coeffs[j2]
+
+        def shrink(c, p, T):
+            s_p = _mad(p)          # per-sub-band MAD of the previous model
+            if s_p <= 0.0:
+                # Sub-band still identically zero in the model (common in the
+                # first reweighted iterations, and for bands the prior has
+                # emptied): there is nothing to debias against, so fall back
+                # to the plain unweighted shrinkage rather than 0/0.
+                w = np.ones_like(c)
+            else:
+                w = k_sigma * s_p / (np.abs(p) + s_p * 1e-6)
+            keep = np.abs(c) > T
+            res = np.zeros_like(c)
+            res[keep] = np.sign(c[keep]) * np.maximum(
+                np.abs(c[keep]) - w[keep] * T, 0.0)
+            return res
+
+        new_details = [shrink(d, p, T) for d, p, T
+                       in zip(details, p_details, thresholds[j2][:-1])]
+        if j2 == n2 - 1 and keep_coarsest:
+            new_approx = approx
+        else:
+            new_approx = shrink(approx, p_approx, thresholds[j2][-1])
+        out.append((new_details, new_approx, orig_lens))
+    return out
 
 
 def _soft_threshold_reweighted(coeffs, rw_thresholds, keep_coarsest):

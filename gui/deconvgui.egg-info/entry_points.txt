@@ -1,0 +1,2 @@
+[console_scripts]
+deconvgui = deconvgui.__main__:main

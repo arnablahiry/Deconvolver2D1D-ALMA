@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deconvolver 2D1D</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Deconvolver <span>2D1D</span></div>
+  <div id="repo" class="repo" title="Repository version (read-only)"></div>
+  <div class="spacer"></div>
+  <div id="jobs-indicator" class="jobs-indicator" hidden></div>
+  <button id="theme-btn" class="ghost" title="Switch light/dark theme">Theme</button>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="side-actions">
+      <button id="new-ms" class="primary">Load MS</button>
+      <button id="new-import">Import cubes</button>
+      <button id="new-toy" title="A synthetic rotating disc, no CASA needed">Synthetic example</button>
+    </div>
+    <h3>Datasets</h3>
+    <ul id="ds-list" class="ds-list"></ul>
+    <div class="side-foot" id="side-foot"></div>
+  </aside>
+
+  <main id="main" class="main">
+    <section class="empty" id="welcome">
+      <h1>Deconvolver 2D1D</h1>
+      <p>Pick a dataset on the left, or start one:</p>
+      <ul>
+        <li><b>Load MS</b>: choose a calibrated measurement set, set imaging parameters and make the dirty cube and PSF with CASA.</li>
+        <li><b>Import cubes</b>: register an existing <code>dirty.npy</code> + <code>psf.npy</code> pair (for example <code>simple/data</code>) or a tclean FITS pair.</li>
+        <li><b>Synthetic example</b>: a toy rotating disc with a known true sky, to try the app without data.</li>
+      </ul>
+    </section>
+  </main>
+</div>
+
+<template id="tpl-browser">
+  <div class="browser">
+    <div class="pathbar"><button class="up" title="Parent folder">↑</button><input class="path mono" spellcheck="false"><button class="go">Open</button></div>
+    <ul class="entries"></ul>
+  </div>
+</template>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

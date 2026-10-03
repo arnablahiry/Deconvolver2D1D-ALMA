@@ -1,0 +1,11 @@
+numpy
+scipy
+matplotlib
+pillow
+astropy
+fastapi>=0.100
+uvicorn>=0.22
+
+[casa]
+casatools
+casatasks

@@ -29,15 +29,18 @@ NOTEBOOKS_DIR = os.path.join(REPO_ROOT, "notebooks")
 
 
 class NotebookBuilder:
-    def __init__(self, out_path, chdir_to_notebooks=False, kernel="python3"):
+    def __init__(self, out_path, chdir_to_notebooks=False, kernel="python3", dpi=100):
         """out_path: where to write the .ipynb (relative to REPO_ROOT or absolute).
         chdir_to_notebooks: run cells with cwd = notebooks/, matching a real
         Jupyter session started there -- needed when cell sources use paths
         like '../data' relative to that directory.
-        kernel: Jupyter kernelspec name written into the notebook metadata."""
+        kernel: Jupyter kernelspec name written into the notebook metadata.
+        dpi: resolution for embedded figure PNGs (default 100, matching every
+        existing build_*_notebook.py; raise it for a sharper embedded image)."""
         self.out_path = out_path if os.path.isabs(out_path) else os.path.join(REPO_ROOT, out_path)
         self.chdir_to_notebooks = chdir_to_notebooks
         self.kernel = kernel          # kernelspec name recorded in the notebook
+        self.dpi = dpi
         self.cells = []
 
     def md(self, text):
@@ -86,7 +89,7 @@ class NotebookBuilder:
                 for fignum in plt.get_fignums():
                     fig = plt.figure(fignum)
                     buf = io.BytesIO()
-                    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+                    fig.savefig(buf, format="png", dpi=self.dpi, bbox_inches="tight")
                     buf.seek(0)
                     b64 = base64.b64encode(buf.read()).decode("ascii")
                     outputs.append({

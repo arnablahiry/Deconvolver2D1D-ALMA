@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: deconvgui
+Version: 0.1.0
+Summary: Local browser GUI for the 2D-1D wavelet deconvolution in Deconvolver2D1D-ALMA
+Requires-Python: >=3.9
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: matplotlib
+Requires-Dist: pillow
+Requires-Dist: astropy
+Requires-Dist: fastapi>=0.100
+Requires-Dist: uvicorn>=0.22
+Provides-Extra: casa
+Requires-Dist: casatools; extra == "casa"
+Requires-Dist: casatasks; extra == "casa"

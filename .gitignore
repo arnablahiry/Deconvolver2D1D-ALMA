@@ -25,6 +25,7 @@ results_previous/
 
 # CASA image dirs + .npy cubes written by simple/grid_with_casa.py
 simple/data/
+simple_results/data/
 
 # experiment logs
 logs/

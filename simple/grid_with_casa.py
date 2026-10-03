@@ -56,6 +56,8 @@ def grid_psf_and_dirty():
     gridpars = {
         "imagename": IMAGE_STEM, "ftmachine": "mosaic", "wprojplanes": 1,
         "padding": 1.2, "pblimit": 0.2, "normtype": "flatnoise",
+        "useautocorr": False, "usedoubleprec": True,
+        "interpolation": "linear", "conjbeams": False,
     }
     imager.defineimage(impars, gridpars)
     imager.setweighting(type="briggs", rmode="norm", robust=0.5)
@@ -64,11 +66,11 @@ def grid_psf_and_dirty():
     normalizer = synthesisnormalizer()
     normalizer.setupnormalizer({
         "imagename": IMAGE_STEM, "normtype": "flatnoise", "workdir": OUT_DIR,
-        "deconvolver": "hogbom", "nterms": 1, "imindex": 0,
+        "deconvolver": "hogbom", "nterms": 1, "imindex": 0, "psfcutoff": 0.35,
     })
     imager.normalizerinfo({
         "imagename": IMAGE_STEM, "normtype": "flatnoise", "workdir": OUT_DIR,
-        "deconvolver": "hogbom", "nterms": 1, "imindex": 0,
+        "deconvolver": "hogbom", "nterms": 1, "imindex": 0, "psfcutoff": 0.35,
     })
 
     # --- 2. grid the PSF: response of the (u,v) coverage + weights to a
