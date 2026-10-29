@@ -9,3 +9,6 @@ uvicorn>=0.22
 [casa]
 casatools
 casatasks
+
+[gpu]
+torch

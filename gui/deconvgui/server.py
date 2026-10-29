@@ -5,7 +5,9 @@ values and select regions locally; everything heavy stays on this machine.
 """
 
 import importlib.util
+import urllib.parse
 import os
+import pickle
 import secrets
 import json
 import socket
@@ -14,13 +16,13 @@ import sys
 import threading
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .jobs import JobManager
-from .render import colormap_lut
+from .render import GIF_VERSION, colormap_lut, make_gif
 from .repoinfo import repo_info
 from .store import REPO_ROOT, Store, read_json, write_json
 
@@ -41,7 +43,9 @@ def create_app(workdir, roots, token):
             q = request.query_params.get("token")
             if q is not None:
                 if not secrets.compare_digest(q, token):
-                    return Response("bad token", status_code=401)
+                    return Response("bad token: this link is from another deconvgui run. "
+                                    "Open the URL printed in the terminal of the running server.",
+                                    status_code=401, media_type="text/plain")
                 resp = RedirectResponse(request.url.path)
                 resp.set_cookie("deconvgui_token", token, httponly=True, samesite="strict")
                 return resp
@@ -131,7 +135,8 @@ def create_app(workdir, roots, token):
     async def dataset_meta(ds_id: str, request: Request):
         _ds(ds_id)
         body = await request.json()
-        allowed = {"name", "cell_arcsec", "beam", "width_kms", "start_kms", "example", "note"}
+        allowed = {"name", "cell_arcsec", "beam", "width_kms", "start_kms", "distance_mpc", "example", "note",
+                   "hires", "hires_ref"}   # hires: "yes"/"no", a better-resolved observation exists; hires_ref: its dataset
         return store.update_meta(ds_id, **{k: v for k, v in body.items() if k in allowed})
 
     @app.delete("/api/datasets/{ds_id}")
@@ -144,16 +149,21 @@ def create_app(workdir, roots, token):
     @app.post("/api/ms/inspect")
     async def ms_inspect(request: Request):
         body = await request.json()
-        ms = _allowed(body["path"])
-        job = jobs.start("inspect", f"inspect {os.path.basename(ms)}", dict(ms_path=ms))
+        paths = [_allowed(x) for x in (body.get("paths") or [body["path"]])]
+        label = os.path.basename(paths[0].rstrip("/")) + (f" + {len(paths) - 1} more" if len(paths) > 1 else "")
+        job = jobs.start("inspect", f"inspect {label}", dict(ms_paths=paths))
         return job.summary()
 
     @app.post("/api/datasets/from_ms")
     async def from_ms(request: Request):
         body = await request.json()
         p = body["params"]
-        p["ms"] = _allowed(p["ms"])
-        name = body.get("name") or os.path.basename(p["ms"].rstrip("/"))
+        p["ms"] = [_allowed(x) for x in (p["ms"] if isinstance(p["ms"], list) else [p["ms"]])]
+        spw_list = p.get("spw_list") or [p["spw"]] * len(p["ms"])
+        if len(spw_list) != len(p["ms"]):
+            raise HTTPException(400, "spw_list needs one entry per MS")
+        p["spw_list"] = [str(x) for x in spw_list]
+        name = body.get("name") or os.path.basename(p["ms"][0].rstrip("/"))
         meta = dict(source="ms", ms=p["ms"], imaging=p, cell_arcsec=float(p["cell_arcsec"]),
                     width_kms=float(p["width_kms"]), start_kms=float(p["start_kms"]),
                     nchan=int(p["nchan"]), imsize=int(p["imsize"]), restfreq_ghz=float(p["restfreq_ghz"]),
@@ -253,7 +263,12 @@ def create_app(workdir, roots, token):
                 store.update_result(ds_id, res_id, **kw)
                 _cache_clear()
 
-            job = jobs.start("deconvolve", f"{p.get('backend')} k={k} on {meta['name']}",
+            b = p.get("backend") or ""
+            method = "FISTA" if b.endswith("fista") else (
+                "primal-dual (pdtau)" if b == "gpu_pd" and p.get("reweight") and (p.get("reweight_ref") or "tau_lambda") == "tau_lambda"
+                else "primal-dual")
+            dev = "" if b.startswith("gpu_") else " (numpy, CPU)"
+            job = jobs.start("deconvolve", f"{method}{dev}, k={k} on {meta['name']}",
                              dict(ds_dir=store.ds_dir(ds_id), res_dir=store.res_dir(ds_id, res_id),
                                   params=p, meta=meta),
                              ds_id=ds_id, res_id=res_id, on_done=done, on_start=started, devices=devices)
@@ -301,12 +316,40 @@ def create_app(workdir, roots, token):
         _cache_clear()
         return dict(ok=True)
 
+    gif_lock = threading.Lock()
+
+    def _gif_current(p):
+        try:
+            with open(p + ".v") as fh:
+                return int(fh.read().strip() or 0) >= GIF_VERSION
+        except (OSError, ValueError):
+            return False
+
     @app.get("/api/datasets/{ds_id}/results/{res_id}/evolution.gif")
     def gif(ds_id: str, res_id: str):
-        p = os.path.join(store.res_dir(ds_id, res_id), "evolution.gif")
+        """the evolution GIF; one made by an older version of the app is re-rendered in the current look
+        from the saved frames (no new solve). Older frames were per pixel: they are converted to arcsec^-2."""
+        d = store.res_dir(ds_id, res_id)
+        p, fp, ip = (os.path.join(d, f) for f in ("evolution.gif", "frames.npy", "frames.json"))
+        if not _gif_current(p) and os.path.isfile(fp) and os.path.isfile(ip):
+            with gif_lock:
+                if not _gif_current(p):
+                    meta, info = _ds(ds_id), store.result_info(ds_id, res_id)
+                    summ = info.get("summary") or {}
+                    frames, cell = np.load(fp).astype(np.float32), meta.get("cell_arcsec")
+                    v = "km/s" if meta.get("width_kms") else "ch"
+                    unit = summ.get("frame_unit")
+                    if not unit:                                  # an older run: frames in Jy/pixel
+                        if cell:
+                            frames, unit = frames / float(cell) ** 2, f"Jy {v} arcsec\u207b\u00b2"
+                        else:
+                            unit = f"Jy/pixel {v}"
+                    make_gif(frames, read_json(ip), p, unit=unit, cell=cell)
         if not os.path.isfile(p):
             raise HTTPException(404, "no GIF yet")
-        return FileResponse(p, media_type="image/gif", filename=f"{ds_id}_{res_id}_evolution.gif")
+        # revalidate every time (ETag): a GIF re-rendered in a new look must not be hidden by a cached copy
+        return FileResponse(p, media_type="image/gif", filename=f"{ds_id}_{res_id}_evolution.gif",
+                            headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/datasets/{ds_id}/results/{res_id}/frame/{i}")
     def result_frame(ds_id: str, res_id: str, i: int):
@@ -335,28 +378,98 @@ def create_app(workdir, roots, token):
         except (KeyError, FileNotFoundError):
             raise HTTPException(404, f"no {kind} cube")
 
-    def _mom0(ds_id, kind, res_id, dv):
-        key = (ds_id, kind, res_id)
+    def _mom0(ds_id, kind, res_id, dv, c0=None, c1=None):
+        key = (ds_id, kind, res_id, c0, c1)
         with cache_lock:
             if key in _cache:
                 return _cache[key]
         cube = _cube(ds_id, kind, res_id)
+        lo = 0 if c0 is None else max(0, c0)
+        hi = cube.shape[0] - 1 if c1 is None else min(cube.shape[0] - 1, c1)
         if kind == "psf":
-            out = np.asarray(cube[cube.shape[0] // 2], dtype=np.float32)
+            out = np.asarray(cube[(lo + hi) // 2], dtype=np.float32)
         else:
-            out = (np.asarray(cube, dtype=np.float64).sum(axis=0) * dv).astype(np.float32)
+            out = (np.asarray(cube[lo:hi + 1], dtype=np.float64).sum(axis=0) * dv).astype(np.float32)
         with cache_lock:
             if len(_cache) > 64:
                 _cache.clear()
             _cache[key] = out
         return out
 
+    def _conv(cube, cell, beam):
+        """cube (nz, ny, nx), Jy/pixel, * a peak-1 Gaussian beam (bmaj", bmin", pa deg) -> Jy/beam"""
+        if os.path.join(REPO_ROOT, "simple") not in sys.path:
+            sys.path.insert(0, os.path.join(REPO_ROOT, "simple"))
+        from restore import convolve_with_beam
+        return convolve_with_beam(np.asarray(cube, dtype=np.float64), float(cell), *beam)
+
+    _conv_cache = {}
+
+    def _mask_cube(ds_id, mrun, which):
+        """MS-CLEAN run mrun's mask as a boolean cube: "clean" its own clean mask, "dendro" the astrodendro mask made for it"""
+        kind = "clean_dmask" if which == "dendro" else "clean_mask"
+        try:
+            return np.asarray(_cube(ds_id, kind, mrun)) > 0
+        except HTTPException:
+            raise HTTPException(404, "no astrodendro mask yet for this MS-CLEAN run: make one" if which == "dendro"
+                                else "this MS-CLEAN run has no clean mask saved (made before masks were kept, or no mask): run it again")
+
+    def _model_conv_cube(ds_id, res, beam):
+        """the whole 2D1D model cube * a beam (Jy/beam), the last one kept (a beam's boxes and the masked
+        moment 0 / spectra ask for the same cube again and again)"""
+        key = (ds_id, res, tuple(beam))
+        with cache_lock:
+            if key in _conv_cache:
+                return _conv_cache[key]
+        out = _conv(np.asarray(_cube(ds_id, "model", res)), _ds(ds_id)["cell_arcsec"], beam)
+        with cache_lock:
+            _conv_cache.clear()
+            _conv_cache[key] = out
+        return out
+
+    def _beam(text):
+        try:
+            b = [float(v) for v in str(text).replace(" ", "").split(",")]
+        except ValueError:
+            b = []
+        if len(b) != 3 or b[0] <= 0 or b[1] <= 0:
+            raise HTTPException(400, "beam: bmaj,bmin,pa (arcsec, arcsec, deg), both axes > 0")
+        return b
+
     @app.get("/api/datasets/{ds_id}/array")
-    def array(ds_id: str, kind: str, plane: str = "mom0", chan: int = 0, res: str = None):
+    def array(ds_id: str, kind: str, plane: str = "mom0", chan: int = 0, res: str = None,
+              c0: int = None, c1: int = None, mrun: str = None, beam: str = None, inmask: bool = False, mask: str = "clean"):
+        """One plane: a channel, or moment 0 (over channels c0..c1 inclusive, default all). MS-CLEAN cubes
+        (kind clean, clean_model, clean_residual) are those of run `mrun`."""
         meta = _ds(ds_id)
+        if kind.startswith("clean"):
+            res = mrun
+        if kind in ("clean_mask", "clean_dmask"):   # 1 where the mask is set in this channel; mom0: the fraction of the masked
+            cube = _cube(ds_id, kind, res)   # channels of c0..c1 in which it is set (the union fills most of a busy field)
+            if plane == "mom0":
+                lo, hi = 0 if c0 is None else max(0, c0), cube.shape[0] - 1 if c1 is None else min(cube.shape[0] - 1, c1)
+                mk = np.asarray(cube[lo:hi + 1]) > 0
+                n = max(1, int(mk.any(axis=(1, 2)).sum()))
+                return _arr(mk.sum(axis=0) / n)
+            return _arr(np.asarray(cube[max(0, min(chan, cube.shape[0] - 1))]) > 0)
+        if kind == "model_conv":   # the 2D1D model * a beam of the caller's choosing (Analysis: target beam)
+            bm = _beam(beam)
+            if plane == "mom0" and inmask:   # moment 0 of only what lies inside MS-CLEAN run mrun's mask, channel by channel
+                mk = _mask_cube(ds_id, mrun, mask)
+                cube = _model_conv_cube(ds_id, res, bm)
+                if mk.shape != cube.shape:
+                    raise HTTPException(409, f"clean mask {list(mk.shape)} does not match the cube {list(cube.shape)}")
+                lo, hi = 0 if c0 is None else max(0, c0), cube.shape[0] - 1 if c1 is None else min(cube.shape[0] - 1, c1)
+                return _arr((cube[lo:hi + 1] * mk[lo:hi + 1]).sum(axis=0) * abs(meta.get("width_kms") or 1.0))
+            if plane == "mom0":
+                m = _mom0(ds_id, "model", res, abs(meta.get("width_kms") or 1.0), c0, c1)
+            else:
+                cube = _cube(ds_id, "model", res)
+                m = np.asarray(cube[max(0, min(chan, cube.shape[0] - 1))], dtype=np.float32)
+            return _arr(_conv(m[None], meta["cell_arcsec"], bm)[0])
         dv = abs(meta.get("width_kms") or 1.0)
         if plane == "mom0":
-            a = _mom0(ds_id, kind, res, dv)
+            a = _mom0(ds_id, kind, res, dv, c0, c1)
         else:
             cube = _cube(ds_id, kind, res)
             chan = max(0, min(chan, cube.shape[0] - 1))
@@ -368,18 +481,143 @@ def create_app(workdir, roots, token):
             a = a[max(0, py - ny // 2): py + ny // 2, max(0, px - nx // 2): px + nx // 2]
         return _arr(a)
 
+    # ---------------------------------------------------------- MS-CLEAN --
+    @app.post("/api/datasets/{ds_id}/msclean")
+    def msclean_start(ds_id: str, body: dict = Body(...)):
+        """Run multiscale CLEAN on the visibilities this dataset was imaged from, on its grid."""
+        meta = _ds(ds_id)
+        if meta.get("status") != "ready" or not (meta.get("imaging") or {}).get("ms"):
+            raise HTTPException(409, "MS-CLEAN needs a ready dataset imaged from measurement sets")
+        ms = meta["imaging"]["ms"]
+        gone = [x for x in (ms if isinstance(ms, list) else [ms]) if not os.path.isdir(x)]
+        if gone:
+            raise HTTPException(404, f"measurement set not found (moved?): {gone[0]}")
+        p = body.get("params") or {}
+        run_id = store.create_clean(ds_id, p)
+
+        def started(job):
+            store.update_clean(ds_id, run_id, status="running", started=job.started)
+
+        def done(job):
+            kw = dict(status=job.status, job=job.id, finished=job.finished)
+            if job.result:
+                kw.update(summary=job.result)
+            if job.error:
+                kw.update(error=job.error)
+            store.update_clean(ds_id, run_id, **kw)
+            _cache_clear()
+
+        job = jobs.start("msclean", f"MS-CLEAN {run_id} on {meta['name']}",
+                         dict(ds_dir=store.ds_dir(ds_id), run_dir=store.clean_dir(ds_id, run_id), params=p, meta=meta),
+                         ds_id=ds_id, res_id=run_id, on_done=done, on_start=started)
+        store.update_clean(ds_id, run_id, job=job.id, status=job.status)
+        return dict(run=run_id, job=job.summary())
+
+    @app.get("/api/datasets/{ds_id}/msclean")
+    def msclean_list(ds_id: str):
+        _ds(ds_id)
+        return store.list_clean(ds_id)
+
+    @app.get("/api/datasets/{ds_id}/msclean/{run_id}/dendro")
+    def dendro_get(ds_id: str, run_id: str):
+        try:
+            path = os.path.join(store.clean_dir(ds_id, run_id), "dendro_mask.json")
+        except KeyError:
+            raise HTTPException(404, "no such MS-CLEAN run")
+        if not os.path.isfile(path):
+            raise HTTPException(404, "no astrodendro mask yet")
+        return read_json(path)
+
+    @app.post("/api/datasets/{ds_id}/msclean/{run_id}/dendro")
+    def dendro_make(ds_id: str, run_id: str, body: dict = Body(default={})):
+        """an astrodendro 3D mask on this MS-CLEAN run's image (worker.dendro_mask), in a separate process"""
+        meta = _ds(ds_id)
+        try:
+            run_dir, run = store.clean_dir(ds_id, run_id), store.list_clean_one(ds_id, run_id)
+        except KeyError:
+            raise HTTPException(404, "no such MS-CLEAN run")
+        cb, cell = (run.get("summary") or {}).get("beam"), meta.get("cell_arcsec")
+        if run.get("status") != "done" or not cb or not cell:
+            raise HTTPException(409, "the MS-CLEAN run is not finished")
+        code = ("import json, sys; from deconvgui.worker import dendro_mask; "
+                "print(json.dumps(dendro_mask(sys.argv[1], float(sys.argv[2]), json.loads(sys.argv[3]))))")
+        try:
+            r = subprocess.run([sys.executable, "-c", code, run_dir, str(1.1331 * cb[0] * cb[1] / cell ** 2), json.dumps(body.get("params") or {})],
+                               capture_output=True, text=True, timeout=1800)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "the dendrogram took over 30 minutes: raise min_value")
+        if r.returncode:
+            tail = (r.stderr or r.stdout or "").strip().splitlines()
+            raise HTTPException(500, f"astrodendro failed: {tail[-1] if tail else r.returncode}")
+        with cache_lock:
+            _cache.clear()
+        return read_json(os.path.join(run_dir, "dendro_mask.json"))
+
+    @app.delete("/api/datasets/{ds_id}/msclean/{run_id}")
+    def msclean_delete(ds_id: str, run_id: str):
+        try:
+            store.delete_clean(ds_id, run_id)
+        except KeyError:
+            raise HTTPException(404, "no such MS-CLEAN run")
+        _cache_clear()
+        return dict(ok=True)
+
+    @app.get("/api/datasets/{ds_id}/uv")
+    def dataset_uv(ds_id: str, refresh: bool = False):
+        """uv coverage of the measurement sets a dataset was imaged from: about 12 000 baselines per MS
+        (target field, one spw), read with casatools in a separate process (CASA is not thread-safe),
+        then kept in the dataset's uv.json."""
+        meta = _ds(ds_id)
+        ms = [meta["ms"]] if isinstance(meta.get("ms"), str) else list(meta.get("ms") or [])
+        if not ms:
+            raise HTTPException(404, "not imaged from a measurement set")
+        path = os.path.join(store.ds_dir(ds_id), "uv.json")
+        if os.path.isfile(path) and not refresh:
+            return read_json(path)
+        gone = [p for p in ms if not os.path.isdir(p)]
+        if gone:
+            raise HTTPException(404, f"measurement set not found (moved?): {gone[0]}")
+        field = (meta.get("imaging") or {}).get("field") or ""
+        code = "import json, sys; from deconvgui.worker import uv_coverage; uv_coverage(json.loads(sys.argv[1]), sys.argv[2], sys.argv[3])"
+        try:
+            r = subprocess.run([sys.executable, "-c", code, json.dumps(ms), field, path],
+                               capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "reading the visibilities took over 10 minutes")
+        if r.returncode or not os.path.isfile(path):
+            tail = (r.stderr or r.stdout or "").strip().splitlines()
+            raise HTTPException(500, f"reading the visibilities failed: {tail[-1] if tail else r.returncode}")
+        return read_json(path)
+
     @app.post("/api/datasets/{ds_id}/region")
     async def region(ds_id: str, request: Request):
-        """Integrated spectra inside a pixel box (x0, x1, y0, y1 inclusive)."""
+        """Integrated spectra inside a pixel box (x0, x1, y0, y1 inclusive); with clean_mask (and mrun), only
+        over the pixels inside MS-CLEAN run mrun's clean mask (true or "clean") or its astrodendro mask ("dendro"),
+        channel by channel."""
         meta = _ds(ds_id)
         b = await request.json()
-        res = b.get("res")
+        res, mrun = b.get("res"), b.get("mrun")
         x0, x1 = sorted((int(b["x0"]), int(b["x1"])))
         y0, y1 = sorted((int(b["y0"]), int(b["y1"])))
+        win = None
+        if b.get("clean_mask"):   # true / "clean": the run's clean mask; "dendro": its astrodendro mask
+            if not mrun:
+                raise HTTPException(400, "clean_mask needs an MS-CLEAN run (mrun)")
+            win = _mask_cube(ds_id, mrun, b["clean_mask"])[:, y0:y1 + 1, x0:x1 + 1]
+
+        def total(cube):   # (nz, ny, nx) -> per-channel sum over the box (and the mask)
+            a = np.asarray(cube[:, y0:y1 + 1, x0:x1 + 1], dtype=np.float64)
+            if win is None:
+                return a.sum(axis=(1, 2))
+            if win.shape != a.shape:
+                raise HTTPException(409, f"clean mask {list(win.shape)} does not match the cube {list(a.shape)}")
+            return (a * win).sum(axis=(1, 2))
         beam, cell = meta.get("beam"), meta.get("cell_arcsec")
         beam_px = (1.1331 * beam[0] * beam[1] / cell ** 2) if beam and cell else None
         out = dict(box=[x0, x1, y0, y1], beam_area_px=beam_px, unit="Jy" if beam_px else "sum of pixels")
         kinds = ["dirty"] + (["model", "restored", "residual"] if res else [])
+        rb = ((store.result_info(ds_id, res).get("summary") or {}).get("restored_beam")) if res else None
+        rb_px = (1.1331 * rb[0] * rb[1] / cell ** 2) if rb and cell else beam_px     # the restoring beam
         if os.path.isfile(os.path.join(store.ds_dir(ds_id), "truth.npy")):
             kinds.append("truth")
         for kind in kinds:
@@ -387,10 +625,28 @@ def create_app(workdir, roots, token):
                 cube = _cube(ds_id, kind, res)
             except HTTPException:
                 continue
-            s = np.asarray(cube[:, y0:y1 + 1, x0:x1 + 1], dtype=np.float64).sum(axis=(1, 2))
+            s = total(cube)
             if kind in ("dirty", "restored", "residual") and beam_px:
-                s = s / beam_px                       # Jy/beam summed over pixels -> Jy
+                s = s / (rb_px if kind == "restored" else beam_px)      # Jy/beam summed over pixels -> Jy
             out[kind] = s.tolist()
+        if res and b.get("rbeam"):   # the 2D1D model * a chosen target beam, in place of the saved restored cube
+            tb = _beam(",".join(str(v) for v in b["rbeam"]))
+            s = total(_model_conv_cube(ds_id, res, tb))
+            out["restored"] = (s / (1.1331 * tb[0] * tb[1] / cell ** 2)).tolist()
+            out["restored_beam"] = tb
+        if mrun:   # MS-CLEAN model * its clean beam, summed and divided by that beam's area -> Jy
+            try:
+                cb = (store.list_clean_one(ds_id, mrun).get("summary") or {}).get("beam")
+                cube = _cube(ds_id, "clean", mrun)
+                s = total(cube)
+                out["clean"] = (s / (1.1331 * cb[0] * cb[1] / cell ** 2) if cb and cell else s).tolist()
+                # + its residual: CLEAN's image (CASA .image); an early-stopped CLEAN leaves real emission there
+                rs = total(_cube(ds_id, "clean_residual", mrun))
+                out["clean_image"] = ((s + rs) / (1.1331 * cb[0] * cb[1] / cell ** 2) if cb and cell else s + rs).tolist()
+            except (HTTPException, KeyError):
+                pass
+        if win is not None:
+            out["clean_mask_px"] = win.sum(axis=(1, 2)).tolist()
         nz = len(out["dirty"])
         if meta.get("start_kms") is not None and meta.get("width_kms"):
             out["axis"] = [meta["start_kms"] + k * meta["width_kms"] for k in range(nz)]
@@ -399,6 +655,110 @@ def create_app(workdir, roots, token):
             out["axis"] = list(range(nz))
             out["axis_label"] = "channel"
         return out
+
+    # ------------------------------------------------------ crop / save --
+    GEOMETRY = ("cell_arcsec", "beam", "width_kms")
+
+    def _extract(ds_id, req):
+        """Cut a dataset to req["box"] (x0, x1, y0, y1 inclusive; None = whole field) and channels
+        req["c0"]..req["c1"] (inclusive; None = all), with req["geometry"] overriding the cell, beam
+        and channel width. Returns (arrays, meta). The dirty cube and true sky are cut to the box;
+        the PSF is cut to twice the box around its peak, wherever the box is: it is shift-invariant,
+        and the solvers want it at least twice the image and find its peak themselves."""
+        meta = _ds(ds_id)
+        if meta.get("status") != "ready":
+            raise HTTPException(409, f"dataset is {meta.get('status')}, not ready")
+        dirty = store.load(ds_id, "dirty")
+        nz, ny, nx = dirty.shape
+        box = req.get("box") or dict(x0=0, x1=nx - 1, y0=0, y1=ny - 1)
+        x0, x1 = sorted((int(box["x0"]), int(box["x1"])))
+        y0, y1 = sorted((int(box["y0"]), int(box["y1"])))
+        c0 = 0 if req.get("c0") is None else int(req["c0"])
+        c1 = nz - 1 if req.get("c1") is None else int(req["c1"])
+        c0, c1 = sorted((c0, c1))
+        if x0 < 0 or y0 < 0 or x1 >= nx or y1 >= ny or min(x1 - x0, y1 - y0) < 7:
+            raise HTTPException(400, f"crop box {[x0, x1, y0, y1]} must be at least 8 px and inside the {nx}x{ny} image")
+        if c0 < 0 or c1 >= nz or c1 - c0 < 1:
+            raise HTTPException(400, f"channel range {c0}-{c1} must hold at least 2 of the {nz} channels")
+        w, hgt = x1 - x0 + 1, y1 - y0 + 1
+        out = dict(dirty=np.ascontiguousarray(dirty[c0:c1 + 1, y0:y1 + 1, x0:x1 + 1]))
+        psf = store.load(ds_id, "psf")
+        py, px = np.unravel_index(np.argmax(psf[c0]), psf.shape[1:])
+        out["psf"] = np.ascontiguousarray(psf[c0:c1 + 1, max(0, py - hgt):py + hgt, max(0, px - w):px + w])
+        t = os.path.join(store.ds_dir(ds_id), "truth.npy")
+        if os.path.isfile(t):
+            out["truth"] = np.ascontiguousarray(np.load(t, mmap_mode="r")[c0:c1 + 1, y0:y1 + 1, x0:x1 + 1])
+        m = {k: v for k, v in meta.items() if k not in ("id", "name", "created", "status", "job", "error", "example", "results")}
+        m.update({k: v for k, v in (req.get("geometry") or {}).items() if k in GEOMETRY})
+        whole = (x0, x1, y0, y1, c0, c1) == (0, nx - 1, 0, ny - 1, 0, nz - 1)
+        if not whole:
+            crop = dict(parent=ds_id, parent_name=meta.get("name"), box=[x0, x1, y0, y1], parent_size=[nx, ny],
+                        chans=[c0, c1], parent_nchan=nz,
+                        centre_offset_px=[(x0 + x1 + 1) / 2 - nx / 2, (y0 + y1 + 1) / 2 - ny / 2])
+            m.update(crop=crop, crops=meta.get("crops", []) + [crop])
+        if m.get("start_kms") is not None and m.get("width_kms"):
+            m["start_kms"] = m["start_kms"] + c0 * m["width_kms"]
+        m.update(imsize=w, nchan=c1 - c0 + 1)
+        parts = ([f"{w}px"] if (w, hgt) != (nx, ny) else []) + ([f"ch {c0}-{c1}"] if (c0, c1) != (0, nz - 1) else [])
+        m["name"] = f"{meta.get('name', ds_id)} crop {' '.join(parts)}" if parts else meta.get("name", ds_id)
+        return out, m
+
+    def _register(arrays, meta):
+        """A new ready dataset from arrays (dirty, psf, optional truth) and metadata."""
+        new_id = store.create_dataset(meta.pop("name"), dict(meta, status="ready"))
+        d = store.ds_dir(new_id)
+        try:
+            for k, a in arrays.items():
+                np.save(os.path.join(d, f"{k}.npy"), a)
+        except Exception:
+            store.delete_dataset(new_id)
+            raise
+        return store.meta(new_id)
+
+    @app.post("/api/datasets/{ds_id}/crop")
+    def dataset_crop(ds_id: str, req: dict = Body(...)):
+        """Save in memory: the cut (and geometry) as a new dataset; the original is kept, so its
+        results stay valid."""
+        arrays, meta = _extract(ds_id, req)
+        return _register(arrays, meta)
+
+    @app.post("/api/datasets/{ds_id}/export")
+    def dataset_export(ds_id: str, req: dict = Body(...)):
+        """Save on disk: the cut as a pickle at req["path"] (inside the browsable roots)."""
+        path = req.get("path") or ""
+        if not path.endswith(".pkl"):
+            raise HTTPException(400, "the file name must end in .pkl")
+        rp = _allowed(path)
+        if not os.path.isdir(os.path.dirname(rp)):
+            raise HTTPException(400, f"no such folder: {os.path.dirname(rp)}")
+        if os.path.exists(rp) and not req.get("overwrite"):
+            raise HTTPException(409, f"{rp} already exists")
+        arrays, meta = _extract(ds_id, req)
+        meta = {k: v for k, v in meta.items() if k != "crops"}
+        tmp = rp + ".part"
+        with open(tmp, "wb") as f:
+            pickle.dump(dict(format="deconvgui-1", meta=meta, **arrays), f, protocol=4)
+        os.replace(tmp, rp)
+        return dict(path=rp, size=os.path.getsize(rp))
+
+    @app.post("/api/datasets/from_pkl")
+    def dataset_from_pkl(req: dict = Body(...)):
+        """Load saved data: a pickle written by Save on disk becomes a new dataset."""
+        rp = _allowed(req.get("path") or "")
+        if not os.path.isfile(rp):
+            raise HTTPException(404, f"no such file: {rp}")
+        try:
+            with open(rp, "rb") as f:
+                d = _ArraysOnly(f).load()
+        except pickle.UnpicklingError as e:
+            raise HTTPException(400, f"not a file saved by this app: {e}")
+        if not isinstance(d, dict) or not all(isinstance(d.get(k), np.ndarray) and d[k].ndim == 3 for k in ("dirty", "psf")):
+            raise HTTPException(400, "the file must hold 3-D 'dirty' and 'psf' arrays (nchan, ny, nx)")
+        meta = {k: v for k, v in (d.get("meta") or {}).items() if k not in ("id", "created", "status", "job", "error", "example")}
+        meta.update(nchan=int(d["dirty"].shape[0]), imsize=int(d["dirty"].shape[2]), loaded_from=rp,
+                    name=meta.get("name") or os.path.splitext(os.path.basename(rp))[0])
+        arrays = {k: d[k] for k in ("dirty", "psf", "truth") if isinstance(d.get(k), np.ndarray)}
+        return _register(arrays, meta)
 
     # ------------------------------------------------------------- jobs --
     @app.get("/api/jobs")
@@ -418,9 +778,12 @@ def create_app(workdir, roots, token):
             j = jobs.get(job_id)
         except KeyError:
             raise HTTPException(404, "unknown job")
-        if j.frame is None:
+        live = j.live   # one read: the frame and the progress of the same iteration
+        if live is None:
             raise HTTPException(404, "no frame yet")
-        return _arr(j.frame, extra={"X-Iter": str(j.frame_iter)})
+        it, frame, fraction, message = live
+        return _arr(frame, extra={"X-Iter": str(it), "X-Fraction": "" if fraction is None else str(fraction),
+                                  "X-Message": urllib.parse.quote(message or "")})
 
     @app.post("/api/jobs/{job_id}/cancel")
     def job_cancel(job_id: str):
@@ -441,11 +804,24 @@ def create_app(workdir, roots, token):
     return app
 
 
+class _ArraysOnly(pickle.Unpickler):
+    """Unpickles numpy arrays and plain Python data only: a pickle can otherwise run any code."""
+    SAFE = {("numpy", "ndarray"), ("numpy", "dtype"), ("numpy.core.multiarray", "_reconstruct"),
+            ("numpy._core.multiarray", "_reconstruct"), ("numpy.core.multiarray", "scalar"),
+            ("numpy._core.multiarray", "scalar"), ("numpy.core.numeric", "_frombuffer"),
+            ("numpy._core.numeric", "_frombuffer"), ("builtins", "bytearray"), ("collections", "OrderedDict")}
+
+    def find_class(self, module, name):
+        if (module, name) in self.SAFE:
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(f"refusing to load {module}.{name}")
+
+
 def _arr(a, extra=None):
     a = np.ascontiguousarray(a, dtype="<f4")
     finite = a[np.isfinite(a)]
     headers = {"X-Shape": f"{a.shape[0]},{a.shape[1]}", "Cache-Control": "no-store",
-               "Access-Control-Expose-Headers": "X-Shape, X-Iter"}
+               "Access-Control-Expose-Headers": "X-Shape, X-Iter, X-Fraction, X-Message"}
     if finite.size:
         headers["X-Range"] = f"{float(finite.min())},{float(finite.max())}"
     if extra:

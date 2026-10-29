@@ -62,8 +62,9 @@ CASA one (~1-2 min/iteration).
 
 ## Data
 
-Calibrated MSs live outside the repo, under `/nas/datasets/ALMA_visibilities`
-(see `LAYOUT.txt` there). Project 2017.1.00255.S, band 6:
+Calibrated MSs live outside the repo, under `/nas/datasets/ALMA_visibilities`,
+as `<Galaxy>/{extended,compact}/` (see `LAYOUT.txt` there). Project
+2017.1.00255.S, band 6:
 
 | galaxy | config | MOUS | EB(s) |
 |---|---|---|---|

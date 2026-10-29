@@ -13,3 +13,5 @@ Requires-Dist: uvicorn>=0.22
 Provides-Extra: casa
 Requires-Dist: casatools; extra == "casa"
 Requires-Dist: casatasks; extra == "casa"
+Provides-Extra: gpu
+Requires-Dist: torch; extra == "gpu"

@@ -7,6 +7,8 @@ ratio x the plane's peak), dilated 10 px and +-1 channel; 200 primal-dual iterat
 (k = 3) inside the mask per cycle, until the mask grows by < 0.01% of voxels.
 
     grow_mask.py --galaxy ngc2369 --out data/ngc2369/extended/pd/support_mask.npy
+    grow_mask.py --galaxy ngc3110 --cfg compact [--sim] --out mask.npy     (0.04" grid: starlet planes 3-6,
+                                                                           15 px dilation, scaled to the compact beam)
 """
 import argparse
 import os
@@ -21,31 +23,33 @@ from common import G, problem  # noqa: E402
 
 ap = argparse.ArgumentParser(); ap.add_argument("--galaxy", default="ngc2369"); ap.add_argument("--out", required=True)
 ap.add_argument("--k", type=float, default=3.0)
+ap.add_argument("--cfg", default="extended"); ap.add_argument("--sim", action="store_true")
 a = ap.parse_args()
-SC = (2, 3, 4, 5)
+SC, GROW = ((2, 3, 4, 5), 10) if a.cfg == "extended" else ((3, 4, 5, 6), 15)
 # the problem without a support mask (the mask is what is being made)
 import common  # noqa: E402
-psf, dirty = common.read(a.galaxy, "extended", "dirty_beam_cube.fits"), common.read(a.galaxy, "extended", "dirty_cube.fits")
-noise_ch = common.noise_channels(a.galaxy, "extended")
-op = G.Op(psf, dirty); D = G.Dict2D1D(op.d.shape, 8, 5)
-lam, _, _, _ = G.noise_lambdas(D, op.d, noise_ch, k=a.k)
-beta = G.field_lipschitz(op)
+P = problem(a.galaxy, a.cfg, sim=a.sim, k=a.k)
+P.support = None
+op, D, lam, beta, noise_ch = P.op, P.D, P.lam, P.beta, P.noise
+psf = common.read(a.galaxy, a.cfg, "dirty_beam_cube.fits")
+if P.bin > 1:
+    psf = G.rebin(common.read(a.galaxy, a.cfg, "dirty_cube.fits"), psf, P.bin)[1]
 
 nz, ny, nx = op.d.shape
 vs = lambda c: F.avg_pool1d(c.permute(1, 2, 0).reshape(-1, 1, nz), 3, 1, 1, count_include_pad=False).reshape(ny, nx, nz).permute(2, 0, 1)
 noise = G.noise_with_ps(G.measured_ps(G.noise_planes(op.d, noise_ch)), op.d.shape, seed=11)
 pn = G.starlet(vs(noise), max(SC) + 1)
 sig_j = {j: float(1.4826 * (pn[j] - pn[j].median()).abs().median()) for j in SC}; del pn, noise
-p0 = psf[16]; cy, cx = np.unravel_index(np.argmax(p0), p0.shape)
-pp = G.starlet(G.to_t(p0[cy - 400:cy + 400, cx - 400:cx + 400])[None], max(SC) + 1)[:, 0]
-yy, xx = np.indices((800, 800)); rr = torch.tensor(np.hypot(yy - 400, xx - 400), device=G.DEV)
-side_j = {j: float(pp[j][rr > max(3 * 2 ** j, 15)].max() / pp[j][400, 400]) for j in SC}
+p0 = psf[16]; cy, cx = np.unravel_index(np.argmax(p0), p0.shape); h = ny // 2
+pp = G.starlet(G.to_t(p0[cy - h:cy + h, cx - h:cx + h])[None], max(SC) + 1)[:, 0]
+yy, xx = np.indices((2 * h, 2 * h)); rr = torch.tensor(np.hypot(yy - h, xx - h), device=G.DEV)
+side_j = {j: float(pp[j][rr > max(3 * 2 ** j, 15)].max() / pp[j][h, h]) for j in SC}
 print(f"noise channels {noise_ch}; plane sigma {sig_j}; sidelobe ratio {side_j}", flush=True)
 
 mask = torch.zeros_like(op.d, dtype=torch.bool); x = torch.zeros_like(op.d); u = None
 for cyc in range(15):
     before = int(mask.sum())
-    mask = G.grow_support(mask, -op.grad(x), sig_j, side_j, SC, nsig=5.0, slfac=1.5, grow_px=10)
+    mask = G.grow_support(mask, -op.grad(x), sig_j, side_j, SC, nsig=5.0, slfac=1.5, grow_px=GROW)
     added = int(mask.sum()) - before
     print(f"cycle {cyc}: mask {float(mask.float().mean()):.2%} of voxels (+{added})", flush=True)
     if cyc > 0 and added < 1e-4 * mask.numel():

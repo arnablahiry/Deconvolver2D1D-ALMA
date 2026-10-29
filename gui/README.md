@@ -62,10 +62,13 @@ the page picks up the live progress again. VS Code Remote-SSH forwards the
 port for you.
 
 Options: `--host` (default 127.0.0.1, i.e. reachable only through the
-tunnel), `--root` (repeatable; folders the file browser may open, default
-home + current directory), `--workdir` (default `~/deconvgui_work`, also
-`$DECONVGUI_WORKDIR`), `--token`, `--no-token` (single-user laptop only),
-`--no-browser`.
+tunnel), `--root` (repeatable; extra folders the file browser may open, on top
+of home and the current directory, which are always allowed; the browser
+starts in the first `--root`), `--workdir` (default `~/deconvgui_work`, also
+`$DECONVGUI_WORKDIR`), `--token` (default `$DECONVGUI_TOKEN`, else a random
+token saved in `<workdir>/.token`, so the URL stays valid across restarts),
+`--no-token` (single-user laptop only), `--no-browser`. In a VS Code Remote
+terminal the browser tab opens on your laptop with the port forwarded.
 
 ## How it uses the repository
 

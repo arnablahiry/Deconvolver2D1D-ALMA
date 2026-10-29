@@ -1,0 +1,108 @@
+== solves done
+== knot_resolution
+real: compact model vs extended dirty
+  (-0.54,+1.84)  S/N  115.8  theta +0.470"  [+0.460, +0.480]
+  (-0.34,-1.10)  S/N   86.5  theta +0.300"  [+0.290, +0.300]
+  (-0.54,-0.12)  S/N   70.7  theta +0.450"  [+0.440, +0.460]
+  (-0.44,-0.60)  S/N   66.6  theta +0.500"  [+0.500, +0.500]  EDGE
+  (-2.74,-3.56)  S/N   65.6  theta +0.480"  [+0.468, +0.500]
+  (-0.90,+1.54)  S/N   71.4  theta +0.360"  [+0.350, +0.370]
+  (-1.60,-4.14)  S/N   56.8  theta +0.450"  [+0.405, +0.462]
+  (-0.26,+0.44)  S/N   56.2  theta +0.330"  [+0.318, +0.340]
+  (+1.92,+1.60)  S/N   59.8  theta +0.280"  [+0.268, +0.300]
+  (-0.12,-3.96)  S/N   55.9  theta +0.340"  [+0.330, +0.350]
+  (-3.18,-2.56)  S/N   45.4  theta +0.500"  [+0.500, +0.500]  EDGE
+  (-0.58,+0.64)  S/N   49.7  theta +0.310"  [+0.310, +0.330]
+  (-0.56,-4.28)  S/N   55.6  theta +0.220"  [+0.210, +0.230]
+  (-1.34,-0.40)  S/N   18.6  theta +0.480"  [+0.458, +0.482]
+  (+1.48,+1.74)  S/N   37.7  theta +0.390"  [+0.378, +0.392]
+  (-1.08,-4.14)  S/N   54.5  theta -0.300"  [-0.300, -0.300]  EDGE
+  (+1.22,+2.14)  S/N   28.7  theta +0.500"  [+0.500, +0.500]  EDGE
+  (+4.08,-0.18)  S/N   23.2  theta +0.490"  [+0.435, +0.500]
+  (-3.28,-3.00)  S/N   46.8  theta -0.300"  [-0.300, -0.300]  EDGE
+  (+1.10,+1.76)  S/N   30.7  theta +0.390"  [+0.378, +0.400]
+  (+0.92,+1.50)  S/N   24.4  theta +0.350"  [+0.338, +0.360]
+  (-1.30,+0.14)  S/N   14.6  theta +0.370"  [+0.348, +0.380]
+  (+2.86,+0.76)  S/N   34.9  theta +0.500"  [+0.500, +0.500]  EDGE
+  (+3.64,+0.36)  S/N   23.0  theta +0.480"  [+0.455, +0.500]
+  (-3.76,-1.16)  S/N   27.4  theta -0.300"  [-0.300, -0.300]  EDGE
+[real] global offset dx +1.8 mas, dy +8.4 mas; 25 knots
+sim: compact sim model vs extended sim dirty
+  (-0.00,+0.02)  S/N   62.9  theta +0.250"  [+0.240, +0.260]
+  (+0.10,+0.54)  S/N   59.9  theta +0.290"  [+0.290, +0.300]
+  (+1.82,-1.58)  S/N   56.9  theta +0.300"  [+0.290, +0.300]
+  (+0.48,+0.52)  S/N   51.5  theta +0.300"  [+0.300, +0.310]
+  (+3.94,-3.12)  S/N   44.1  theta +0.380"  [+0.370, +0.380]
+  (-3.72,+0.18)  S/N   39.6  theta +0.310"  [+0.260, +0.282]
+  (+3.54,-3.02)  S/N   41.9  theta +0.360"  [+0.340, +0.370]
+  (-3.94,+3.14)  S/N   36.1  theta +0.270"  [+0.150, +0.262]
+  (+2.78,-3.62)  S/N   40.8  theta +0.330"  [+0.320, +0.340]
+  (+1.58,-3.26)  S/N   39.5  theta +0.240"  [+0.228, +0.290]
+  (-0.28,-0.82)  S/N   37.1  theta +0.230"  [+0.210, +0.240]
+  (+3.14,-3.92)  S/N   35.2  theta +0.290"  [+0.270, +0.292]
+  (-3.00,+4.02)  S/N   33.7  theta +0.260"  [+0.230, +0.270]
+  (-2.24,+4.36)  S/N   34.5  theta +0.240"  [+0.190, +0.265]
+  (+2.76,-4.14)  S/N   33.4  theta +0.270"  [+0.250, +0.272]
+  (+3.76,-0.20)  S/N   32.8  theta +0.400"  [+0.388, +0.400]
+  (-2.74,+4.16)  S/N   30.2  theta +0.260"  [+0.220, +0.270]
+  (-3.70,+3.46)  S/N   29.9  theta +0.320"  [+0.298, +0.310]
+  (-0.72,-1.60)  S/N   30.0  theta +0.270"  [+0.260, +0.270]
+  (+1.58,-0.50)  S/N   29.2  theta +0.340"  [+0.330, +0.360]
+  (+2.28,-4.32)  S/N   27.7  theta +0.220"  [+0.218, +0.230]
+  (+0.48,-0.12)  S/N   27.1  theta +0.240"  [+0.238, +0.250]
+  (+1.48,-1.08)  S/N   27.2  theta +0.380"  [+0.378, +0.400]
+  (-0.24,+3.52)  S/N   26.2  theta +0.270"  [+0.258, +0.290]
+  (+1.68,+1.42)  S/N   27.2  theta +0.290"  [+0.290, +0.300]
+[sim] global offset dx -16.7 mas, dy +15.1 mas; 25 knots
+sim, exact: compact sim model vs truth itself (noise-free reference: truth * PSF_ext)
+  (-0.00,+0.02)  S/N    8.2  theta +0.250"  [+0.250, +0.250]
+  (+0.10,+0.54)  S/N    8.0  theta +0.300"  [+0.300, +0.300]
+  (+1.82,-1.58)  S/N    7.5  theta +0.290"  [+0.290, +0.290]
+  (+0.48,+0.52)  S/N    6.7  theta +0.300"  [+0.300, +0.300]
+  (+3.94,-3.12)  S/N    5.7  theta +0.370"  [+0.370, +0.370]
+  (-3.72,+0.18)  S/N    5.2  theta +0.350"  [+0.350, +0.350]
+  (+3.54,-3.02)  S/N    5.5  theta +0.360"  [+0.360, +0.360]
+  (-3.94,+3.14)  S/N    4.7  theta +0.340"  [+0.340, +0.340]
+  (+2.78,-3.62)  S/N    5.2  theta +0.320"  [+0.320, +0.320]
+  (+1.58,-3.26)  S/N    5.1  theta +0.250"  [+0.250, +0.250]
+  (-0.28,-0.82)  S/N    4.8  theta +0.230"  [+0.230, +0.230]
+  (+3.14,-3.92)  S/N    4.6  theta +0.280"  [+0.280, +0.280]
+  (-3.00,+4.02)  S/N    4.5  theta +0.250"  [+0.250, +0.250]
+  (-2.24,+4.36)  S/N    4.5  theta +0.240"  [+0.240, +0.240]
+  (+2.76,-4.14)  S/N    4.5  theta +0.260"  [+0.260, +0.260]
+  (+3.76,-0.20)  S/N    4.4  theta +0.410"  [+0.410, +0.410]
+  (-2.74,+4.16)  S/N    4.0  theta +0.250"  [+0.250, +0.250]
+  (-3.70,+3.46)  S/N    3.9  theta +0.340"  [+0.340, +0.340]
+  (-0.72,-1.60)  S/N    4.0  theta +0.270"  [+0.270, +0.270]
+  (+1.58,-0.50)  S/N    3.8  theta +0.350"  [+0.350, +0.350]
+  (+2.28,-4.32)  S/N    3.8  theta +0.220"  [+0.220, +0.220]
+  (+0.48,-0.12)  S/N    3.6  theta +0.240"  [+0.240, +0.240]
+  (+1.48,-1.08)  S/N    3.5  theta +0.380"  [+0.380, +0.380]
+  (-0.24,+3.52)  S/N    3.5  theta +0.280"  [+0.280, +0.280]
+  (+1.68,+1.42)  S/N    3.5  theta +0.300"  [+0.300, +0.300]
+[sim exact] global offset dx -17.0 mas, dy +13.9 mas; 25 knots
+saved data/experiments/09_knot_resolution/fista_k2_40k/knot_resolution.json
+== fig48
+saved figures/fista/40k/48_knot_resolution_compact.png | sharpest {'x': -0.56, 'y': -4.28, 'snr': 55.64224520780568, 'theta': 0.22, 'theta_16': 0.21000000000000002, 'theta_84': 0.23, 'at_edge': False} | median 0.38 | 5 sharpest [np.float64(0.22), np.float64(0.28), np.float64(0.3), np.float64(0.31), np.float64(0.33)]
+== analyze_injection
+S/N     5: flux ratio  0.10  FWHM 0.019" (0.020 x 0.017)  offset  27.7 mas  peak-pixel fraction 0.01  T(k=5) 0.02
+S/N     8: flux ratio  0.54  FWHM 0.592" (0.393 x 0.892)  offset 228.7 mas  peak-pixel fraction 0.03  T(k=5) 0.03
+S/N    12: flux ratio  0.58  FWHM 0.298" (0.272 x 0.326)  offset  55.4 mas  peak-pixel fraction 0.04  T(k=5) 0.03
+S/N    20: flux ratio  0.55  FWHM 0.283" (0.308 x 0.260)  offset  79.3 mas  peak-pixel fraction 0.03  T(k=5) 0.03
+S/N    30: flux ratio  0.93  FWHM 0.329" (0.328 x 0.330)  offset  54.9 mas  peak-pixel fraction 0.02  T(k=5) 0.02
+S/N    50: flux ratio  0.84  FWHM 0.331" (0.353 x 0.311)  offset   7.8 mas  peak-pixel fraction 0.03  T(k=5) 0.03
+S/N    80: flux ratio  0.81  FWHM 0.154" (0.167 x 0.141)  offset   9.0 mas  peak-pixel fraction 0.09  T(k=5) 0.10
+S/N   130: flux ratio  0.99  FWHM 0.177" (0.180 x 0.174)  offset  69.2 mas  peak-pixel fraction 0.08  T(k=5) 0.07
+S/N   200: flux ratio  0.99  FWHM 0.175" (0.189 x 0.163)  offset  18.8 mas  peak-pixel fraction 0.08  T(k=5) 0.08
+S/N   350: flux ratio  0.98  FWHM 0.067" (0.057 x 0.078)  offset   8.9 mas  peak-pixel fraction 0.20  T(k=5) 0.29
+S/N   600: flux ratio  1.01  FWHM 0.057" (0.059 x 0.054)  offset  23.3 mas  peak-pixel fraction 0.22  T(k=5) 0.34
+S/N  1000: flux ratio  1.00  FWHM 0.056" (0.053 x 0.058)  offset   4.3 mas  peak-pixel fraction 0.25  T(k=5) 0.32
+== fig49
+/nas/homes/alahiry/repos/Deconvolver2D1D-ALMA/scripts/superres_figures/fig49_point_injection.py:99: RuntimeWarning: Mean of empty slice
+  return np.array([Fk[(kr >= lo) & (kr < hi)].mean() for lo, hi in zip(edges[:-1], edges[1:])])
+/scratch/alahiry/conda/envs/deconvolver2d1d/lib/python3.11/site-packages/numpy/_core/_methods.py:142: RuntimeWarning: invalid value encountered in scalar divide
+  ret = ret.dtype.type(ret / rcount)
+saved figures/fista/40k/49_point_injection_compact.png | median FWHM S/N>=130: 0.067 | T(k) hi: [ nan 0.99 0.99 0.99 0.98 0.97 0.96 0.94 0.91 0.87 0.82 0.75 0.67 0.57
+ 0.46 0.34 0.25 0.18 0.15 0.13 0.13] k [ 0.17  0.21  0.25  0.31  0.39  0.48  0.59  0.73  0.9   1.11  1.37  1.7
+  2.1   2.59  3.2   3.95  4.88  6.02  7.44  9.18 11.34]
+ALLDONE

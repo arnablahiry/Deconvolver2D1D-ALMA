@@ -133,11 +133,56 @@ class Store:
     def delete_result(self, ds_id, res_id):
         shutil.rmtree(self.res_dir(ds_id, res_id))
 
+    # ------------------------------------------------------ MS-CLEAN runs --
+    def clean_dir(self, ds_id, run_id):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_id or ""):
+            raise KeyError(run_id)
+        d = os.path.join(self.ds_dir(ds_id), "msclean", run_id)
+        if not os.path.isdir(d):
+            raise KeyError(run_id)
+        return d
+
+    def create_clean(self, ds_id, params):
+        root = os.path.join(self.ds_dir(ds_id), "msclean")
+        os.makedirs(root, exist_ok=True)
+        n = len(os.listdir(root)) + 1
+        while os.path.exists(os.path.join(root, f"c{n:03d}")):
+            n += 1
+        run_id = f"c{n:03d}"
+        os.makedirs(os.path.join(root, run_id))
+        write_json(os.path.join(root, run_id, "params.json"), dict(params=params, id=run_id, created=time.time(), status="queued"))
+        return run_id
+
+    def update_clean(self, ds_id, run_id, **kw):
+        p = os.path.join(self.clean_dir(ds_id, run_id), "params.json")
+        m = read_json(p)
+        m.update(kw)
+        write_json(p, m)
+        return m
+
+    def list_clean(self, ds_id):
+        root = os.path.join(self.ds_dir(ds_id), "msclean")
+        if not os.path.isdir(root):
+            return []
+        return [read_json(os.path.join(root, r, "params.json")) for r in sorted(os.listdir(root))
+                if os.path.isfile(os.path.join(root, r, "params.json"))]
+
+    def list_clean_one(self, ds_id, run_id):
+        return read_json(os.path.join(self.clean_dir(ds_id, run_id), "params.json"))
+
+    def delete_clean(self, ds_id, run_id):
+        shutil.rmtree(self.clean_dir(ds_id, run_id))
+
     # -------------------------------------------------------------- arrays --
     def load(self, ds_id, kind, res_id=None, mmap=True):
-        """kind: dirty | psf  (dataset) or model | restored | residual (result)."""
+        """kind: dirty | psf  (dataset), model | restored | residual (result res_id), or clean | clean_model |
+        clean_residual | clean_mask | clean_dmask (MS-CLEAN run res_id: model * clean beam, model, residual, clean mask,
+        astrodendro mask)."""
         if kind in ("dirty", "psf"):
             path = os.path.join(self.ds_dir(ds_id), f"{kind}.npy")
+        elif kind in ("clean", "clean_model", "clean_residual", "clean_mask", "clean_dmask"):
+            path = os.path.join(self.clean_dir(ds_id, res_id), {"clean": "restored", "clean_model": "model", "clean_residual": "residual",
+                                                                "clean_mask": "mask", "clean_dmask": "dendro_mask"}[kind] + ".npy")
         elif kind in ("model", "restored", "residual"):
             path = os.path.join(self.res_dir(ds_id, res_id), f"{kind}.npy")
         else:

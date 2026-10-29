@@ -36,7 +36,7 @@ def _sweep_stray_logs():
             if f.startswith("casa-") and f.endswith(".log"):
                 try:
                     shutil.move(os.path.join(d, f), os.path.join(CASA_LOGS_DIR, f))
-                except FileNotFoundError:
+                except (FileNotFoundError, shutil.SameFileError):
                     pass    # swept concurrently by another process (worker pools)
 
 

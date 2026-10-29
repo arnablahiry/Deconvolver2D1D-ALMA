@@ -29,6 +29,10 @@ MODEL = os.environ.get("MODEL", os.path.join(REPO, "data/experiments/04_pd_tau_r
 OUT = os.environ.get("OUT", os.path.join(REPO, "figures/experiments/04_pd_tau_reweighting/5_sigma/45_beam_sequence_compact.png"))
 LABEL = os.environ.get("LABEL", r"compact model: primal-dual ($\tau\lambda$ reweighting), k = 5, 20,000 iterations")
 CLEAN = {c: os.path.join(REPO, f"data/ngc3110/{c}/ms_clean") for c in ("compact", "extended")}
+# EXT_CLEAN: another extended CLEAN under data/ngc3110/extended/ (msclean_cube.py --out-name), EXT_CLEAN_LABEL its settings
+EXT_CLEAN = os.environ.get("EXT_CLEAN", "ms_clean")
+CLEAN["extended"] = os.path.join(REPO, "data/ngc3110/extended", EXT_CLEAN)
+EXT_CLEAN_LABEL = os.environ.get("EXT_CLEAN_LABEL", "")
 CELL, LBMAX = 0.02, 0.1134
 vel = 5073.9 + 25.0 * (np.arange(32) - 15.5)
 L = [i for i, v in enumerate(vel) if 4750 <= v <= 5280]
@@ -107,7 +111,8 @@ for k, (t1, t2, img, b, cap) in enumerate(panels):
     cax.tick_params(which="both", direction="out", top=(r == 0), bottom=(r == 1), labeltop=(r == 0), labelbottom=(r == 1))
     for sp in cax.spines.values():
         sp.set_visible(True)
-fig.text(0.5, 1 - 0.12 / H, f"NGC 3110 CO(2-1), moment 0 (4750-5280 km/s), central 10$^{{\\prime\\prime}}$ -- {LABEL}\n"
+fig.text(0.5, 1 - 0.12 / H, f"NGC 3110 CO(2-1), moment 0 (4750-5280 km/s), central 10$^{{\\prime\\prime}}$ -- {LABEL}"
+         + (f"; extended CLEAN: {EXT_CLEAN_LABEL}" if EXT_CLEAN_LABEL else "") + "\n"
          f"restoring beams from the extended array's longest-baseline resolution ($\\lambda/B_{{\\rm max}}$ = {LBMAX}$^{{\\prime\\prime}}$) "
          f"to the extended clean beam; CLEAN components shown without the residual, last panel: the CLEAN image", ha="center", va="top", fontsize=FS + 1)
 os.makedirs(os.path.dirname(OUT), exist_ok=True)

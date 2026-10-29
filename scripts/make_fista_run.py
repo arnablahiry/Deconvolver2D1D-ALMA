@@ -8,6 +8,8 @@ for 20,000 iterations.
 
     CUDA_VISIBLE_DEVICES=0 /scratch/alahiry/conda/envs/denoise2d1d/bin/python scripts/make_fista_run.py [compact|extended] [k]
     (defaults: compact, k = 2; extended defaults to k = 3)
+    ... make_fista_run.py [compact|extended] [k] --iters 40000
+    (default 20,000; any other count writes its own files, suffixed _<N>k, next to the 20k ones)
 
 compact : as above.
 extended: the problem of the extended primal-dual model (data/ngc3110/extended/pd/README.txt) --
@@ -32,17 +34,21 @@ sys.path.insert(0, os.path.join(REPO, "simple"))
 import gpu_pd as G
 
 args = sys.argv[1:]
+N_ITER = 20000
+if "--iters" in args:
+    i = args.index("--iters"); N_ITER = int(args[i + 1]); del args[i:i + 2]
+ITAG = f"{N_ITER // 1000}k"
+SUF = "" if N_ITER == 20000 else f"_{ITAG}"      # the 20k run keeps its original file names
 CFG = args.pop(0) if args and args[0] in ("compact", "extended") else "compact"
 K = float(args[0]) if args else (2.0 if CFG == "compact" else 3.0)
 TAG = f"{K:g}"
 FIG = os.path.join(REPO, "figures/fista" if CFG == "compact" else f"figures/fista/extended/{TAG}-sigma")
-FRAMES = os.path.join(FIG, "frames")
+FRAMES = os.path.join(FIG, "frames" + SUF)
 DAT = os.path.join(REPO, f"data/ngc3110/{CFG}/fista")
 for d in (FIG, FRAMES, DAT):
     os.makedirs(d, exist_ok=True)
 for f in glob.glob(os.path.join(FRAMES, "frame_*.png")) + glob.glob(os.path.join(FRAMES, "model_hires_*.png")):   # only this script's frames
     os.remove(f)
-N_ITER = 20000
 vel = 5073.9 + 25.0 * (np.arange(32) - 15.5)
 LINE = [i for i, v in enumerate(vel) if 4750 <= v <= 5280]
 EXT = [5, -5, -5, 5]
@@ -90,8 +96,8 @@ for it in range(1, N_ITER + 1):
 print(f"FISTA {CFG} k = {TAG}: {N_ITER} iterations in {time.time() - t0:.0f} s, {len(frames)} frames", flush=True)
 
 xm = x.cpu().numpy().astype(np.float64)
-np.save(os.path.join(DAT, f"model_k{TAG}_20k.npy"), (G.upsample(xm, BIN) if BIN > 1 else xm).astype(np.float32))
-np.savez_compressed(os.path.join(DAT, f"fista_k{TAG}_frames.npz"), it=np.array([f[0] for f in frames]),
+np.save(os.path.join(DAT, f"model_k{TAG}_{ITAG}.npy"), (G.upsample(xm, BIN) if BIN > 1 else xm).astype(np.float32))
+np.savez_compressed(os.path.join(DAT, f"fista_k{TAG}_frames{SUF}.npz"), it=np.array([f[0] for f in frames]),
                     model=np.array([f[1] for f in frames], dtype=np.float32), resid=np.array([f[2] for f in frames], dtype=np.float32),
                     flux=np.array([f[3] for f in frames]), trace=np.array(trace))
 
@@ -139,7 +145,7 @@ for k, (it, m, r, flux) in enumerate(frames):
     ax[2].set_title("convergence" + (" (thin grey lines: reweighting)" if RW else ""))
     fig.suptitle(f"NGC 3110 {CFG}, 2D-1D FISTA deconvolution  --  iteration {it:,}  |  {label(it)}  --  model flux {flux:.1f} Jy", fontsize=14)
     q = os.path.join(FRAMES, f"frame_{k:03d}.png"); fig.savefig(q, dpi=70); plt.close(fig); paths.append(q)
-gif(paths, "fista_evolution.gif")
+gif(paths, f"fista_evolution{SUF}.gif")
 
 plt.rcParams.update({"font.size": 15})
 hi = []
@@ -154,4 +160,4 @@ for k, (it, m, r, flux) in enumerate(frames):
     ax.text(0.97, 0.03, f"model flux {flux:.1f} Jy", transform=ax.transAxes, color="w", fontsize=14, fontweight="bold", ha="right")
     fig.suptitle(f"NGC 3110 {CFG}: raw 2D-1D FISTA model (moment 0, no convolution)", fontsize=16, y=0.955)
     q = os.path.join(FRAMES, f"model_hires_{k:03d}.png"); fig.savefig(q, dpi=130); plt.close(fig); hi.append(q)
-gif(hi, "fista_evolution_model_hires.gif")
+gif(hi, f"fista_evolution_model_hires{SUF}.gif")

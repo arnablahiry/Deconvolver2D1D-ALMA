@@ -1,0 +1,46 @@
+== fig40_overview
+saved; 10" box flux (Jy km/s): {'R': np.float64(498.2), 'C': np.float64(506.4), 'E': np.float64(439.1)}
+== fig41_zooms
+colorbar label widths / spectrum y-label width [in]: [np.float64(1.0), np.float64(1.23), np.float64(0.96)]  check: [np.float64(1.0), np.float64(1.23), np.float64(0.96)]
+saved 43.3 x 28.7 in
+== fig42_channels
+saved; peaks 0.68 0.68 Jy/arcsec^2
+== fig43_profiles
+saved
+== fig44_dirty_raw_restored
+saved; panel (min, max) [[(np.float64(-2.62), np.float64(21.6)), (np.float64(0.0), np.float64(120.7)), (np.float64(0.11), np.float64(47.4))], [(np.float64(-30.7), np.float64(96.8)), (np.float64(0.0), np.float64(178.9)), (np.float64(0.0), np.float64(50.5))]]
+== fig45
+saved figures/fista/40k/45_beam_sequence_compact.png | compact CLEAN beam [1.4194, 0.977, 83.4843] | extended clean beam [0.2206, 0.1719, -74.6706]
+== fig46
+saved figures/fista/40k/46_extended_clean_budget.png
+  Extended CLEAN: components $\ast$ clean beam               249.1 Jy km/s
+  Extended CLEAN: residual (cyan: CLEAN mask)                111.5 Jy km/s
+  Extended CLEAN: image = components + residual              360.6 Jy km/s
+  Extended dirty: observed                                   335.4 Jy km/s
+  Compact deconvolved: observed by the extended array             348.9 Jy km/s
+  Difference: dirty $-$ compact observed                 -13.6 Jy km/s
+  CLEAN mask: fraction of the 10" box (union over line channels) 0.386
+== fig47
+/nas/homes/alahiry/repos/Deconvolver2D1D-ALMA/scripts/superres_figures/fig47_fourier.py:107: RuntimeWarning: invalid value encountered in divide
+  t, ts = rsum(num) / rsum(den_a), ssum(num) / ssum(den_a)
+saved figures/fista/40k/47_fourier_compact.png
+half-power k: compact dirty beam 0.44 c/" (FWHM-eq 1.000"), deconvolved fit 1.05 c/" (FWHM 0.420", chi2/dof 1.03); measured range k = 0.26-2.38
+  k  0.26  T_dirty  0.42+-0.38 (PSF  0.70)  T_model  0.46+-0.44
+  k  0.32  T_dirty  0.58+-0.66 (PSF  0.51)  T_model  1.04+-0.76
+  k  0.38  T_dirty  0.77+-0.35 (PSF  0.59)  T_model  1.83+-0.58
+  k  0.44  T_dirty  0.34+-0.11 (PSF  0.31)  T_model  1.20+-0.46
+  k  0.50  T_dirty  0.28+-0.19 (PSF  0.27)  T_model  1.09+-0.34
+  k  0.57  T_dirty  0.23+-0.09 (PSF  0.13)  T_model  1.04+-0.31
+  k  0.63  T_dirty  0.10+-0.05 (PSF  0.12)  T_model  1.01+-0.34
+  k  0.69  T_dirty  0.02+-0.02 (PSF  0.10)  T_model  0.61+-0.23
+  k  0.79  T_dirty  0.01+-0.01 (PSF  0.06)  T_model  0.44+-0.14
+  k  0.91  T_dirty  0.01+-0.02 (PSF  0.03)  T_model  0.42+-0.17
+  k  1.03  T_dirty  0.01+-0.00 (PSF  0.01)  T_model  0.69+-0.14
+  k  1.16  T_dirty  0.00+-0.01 (PSF  0.01)  T_model  0.46+-0.18
+  k  1.29  T_dirty  0.00+-0.00 (PSF  0.01)  T_model  0.31+-0.14
+  k  1.44  T_dirty -0.00+-0.00 (PSF  0.00)  T_model  0.24+-0.06
+  k  1.66  T_dirty -0.00+-0.00 (PSF  0.00)  T_model  0.10+-0.06
+  k  1.88  T_dirty  0.00+-0.00 (PSF -0.00)  T_model  0.21+-0.14
+  k  2.10  T_dirty  0.00+-0.00 (PSF -0.00)  T_model  0.16+-0.06
+  k  2.38  T_dirty  0.00+-0.00 (PSF -0.00)  T_model  0.06+-0.03
+ALLDONE

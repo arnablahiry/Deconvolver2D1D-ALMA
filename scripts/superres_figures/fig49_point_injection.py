@@ -18,10 +18,13 @@ from astropy.io import fits
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 E = os.path.join(REPO, "data/experiments/10_point_injection")
-REF = os.path.join(REPO, "data/experiments/04_pd_tau_reweighting/compact/pdtau_k5.npy")
+REF = os.environ.get("REF", os.path.join(REPO, "data/experiments/04_pd_tau_reweighting/compact/pdtau_k5.npy"))      # model(data)
+INJECTED = os.environ.get("INJECTED", os.path.join(E, "pdtau_k5_injected.npy"))                                      # model(data + injected)
+RESULTS = os.environ.get("RESULTS", os.path.join(E, "results.json"))
+LABEL = os.environ.get("LABEL", "primal-dual ($\\tau\\lambda$ reweighting), k = 5, 20,000 iterations")
 OUT = os.environ.get("OUT", os.path.join(REPO, "figures/experiments/10_point_injection/49_point_injection_compact.png"))
 D = os.path.join(REPO, "data/ngc3110")
-RES = json.load(open(os.path.join(E, "results.json")))["sources"]
+RES = json.load(open(RESULTS))["sources"]
 vel = 5073.9 + 25.0 * (np.arange(32) - 15.5)
 L = [i for i, v in enumerate(vel) if 4750 <= v <= 5280]
 C, H, LBMAX_E = 0.04, 16, 0.1134
@@ -34,7 +37,7 @@ beam = lambda c: (lambda h: (h["BMAJ"] * 3600, h["BMIN"] * 3600, h["BPA"]))(fits
 BE, BC = beam("extended"), beam("compact")
 geo = lambda b: float(np.sqrt(b[0] * b[1]))
 m0 = lambda p: (np.load(p).astype(np.float64)[L].sum(0) * 25.0).reshape(400, 2, 400, 2).sum((1, 3))
-resp = m0(os.path.join(E, "pdtau_k5_injected.npy")) - m0(REF)
+resp = m0(INJECTED) - m0(REF)
 cut = lambda s, h=H: resp[s["j"] // 2 - h:s["j"] // 2 + h + 1, s["i"] // 2 - h:s["i"] // 2 + h + 1]
 snr = np.array([s["snr_peak_channel"] for s in RES])
 fw = np.array([s["fwhm_geo"] for s in RES])
@@ -113,7 +116,7 @@ a.set_xlabel(r"spatial frequency $k$ [cycles arcsec$^{-1}$]"); a.set_ylabel(r"tr
 a.text(0.03, 0.03, "(b) point-source beam in Fourier space", transform=a.transAxes, va="bottom", fontsize=FS, fontweight="bold")
 a.legend(loc="upper right", frameon=True)
 fig.text(0.5, 1 - 0.12 / H_, "NGC 3110 compact: 12 point sources injected into the real compact dirty cube, deconvolved with the same recipe\n"
-         "primal-dual ($\\tau\\lambda$ reweighting), k = 5, 20,000 iterations; "
+         + LABEL + "; "
          f"bright sources come back at FWHM {fhi:.2f}$^{{\\prime\\prime}}$",
          ha="center", va="top", fontsize=FS - 1)
 os.makedirs(os.path.dirname(OUT), exist_ok=True)

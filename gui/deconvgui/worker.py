@@ -42,7 +42,7 @@ def run_job(kind, args, q, cancel, repo_root):
     try:
         _setup_paths(repo_root)
         fn = {"inspect": inspect_ms_job, "image": image_job, "deconvolve": deconvolve_job,
-              "devices": devices_job}[kind]
+              "devices": devices_job, "msclean": msclean_job}[kind]
         result = fn(q=q, cancel=cancel, **args)
         q.put(("result", result))
     except Cancelled:
@@ -63,8 +63,29 @@ def _kwargs_for(fn, kw):
 # ======================================================================
 # Inspect an MS
 # ======================================================================
-def inspect_ms_job(ms_path, q, cancel):
-    q.put(("progress", dict(fraction=None, message="reading MS metadata (casatools)")))
+def inspect_ms_job(ms_paths, q, cancel):
+    """Inspect one or several MSs (e.g. the execution blocks of one array
+    configuration, imaged together). The first MS supplies fields and spws;
+    `per_ms` keeps each one's own spws so the form can match them up."""
+    per_ms = []
+    for i, ms_path in enumerate(ms_paths):
+        q.put(("progress", dict(fraction=i / len(ms_paths),
+                                message=f"reading MS metadata (casatools): {os.path.basename(ms_path.rstrip('/'))}")))
+        per_ms.append(_inspect_one(ms_path))
+    info = dict(per_ms[0], ms_list=list(ms_paths), per_ms=per_ms)
+    info["nant"] = max(m["nant"] for m in per_ms)
+    bl = [m for m in per_ms if m.get("bl_max")]
+    if bl:
+        info["bl_min"] = min(m["bl_min"] for m in bl)
+        info["bl_max"] = max(m["bl_max"] for m in bl)
+    # Only targets present in every MS can be imaged jointly (by name: field
+    # ids differ between execution blocks with different calibrators).
+    common = set.intersection(*({t["name"] for t in m["target_fields"]} for m in per_ms))
+    info["target_fields"] = [t for t in per_ms[0]["target_fields"] if t["name"] in common]
+    return info
+
+
+def _inspect_one(ms_path):
     from casatools import msmetadata, measures, quanta  # noqa: F401
 
     info = None
@@ -101,7 +122,100 @@ def inspect_ms_job(ms_path, q, cancel):
         md.close()
     info["target_fields"] = targets
     info["mosaic"] = len(targets) > 1 and len({t["name"] for t in targets}) == 1
+    try:
+        info["uv"] = _uv_sample(ms_path, [t["id"] for t in targets])
+    except Exception as e:   # the plot is a nicety: never fail the inspection over it
+        info["uv_error"] = repr(e)
     return info
+
+
+DENDRO_DEFAULTS = dict(min_value=3.0, min_delta=1.0, peak=5.0, min_beams=2.0)
+
+
+def dendro_mask(run_dir, beam_px, params=None):
+    """A 3D signal mask from astrodendro, on MS-CLEAN run run_dir's image (model * clean beam + residual, which has
+    the sidelobes of what was cleaned removed), in units of its noise: the voxels of every trunk structure above
+    min_value sigma (structures split at min_delta sigma, at least min_beams clean beams of voxels) whose peak
+    reaches `peak` sigma. sigma: the median robust rms of the line-free channels (those within 1.5 x the quietest;
+    an early-stopped CLEAN leaves emission in the residual of the line channels), one value for all channels.
+    Computed on a cube binned so the beam's FWHM is ~8 px (the mask is beam-smooth anyway), then brought back
+    to the full grid. Writes dendro_mask.npy (uint8) and dendro_mask.json, returns the latter."""
+    from astrodendro import Dendrogram
+
+    p = dict(DENDRO_DEFAULTS, **{k: float(v) for k, v in (params or {}).items() if k in DENDRO_DEFAULTS and v not in (None, "")})
+    t0 = time.time()
+    res = np.load(os.path.join(run_dir, "residual.npy")).astype(np.float64)
+    img = np.load(os.path.join(run_dir, "restored.npy")).astype(np.float64) + res
+    nz, ny, nx = img.shape
+    f = max(1, int(np.sqrt(beam_px / 1.1331) / 8))
+    rebin = lambda a: a[:, :ny // f * f, :nx // f * f].reshape(nz, ny // f, f, nx // f, f).mean(axis=(2, 4))
+    ib, rb = rebin(img), rebin(res)
+    rms = 1.4826 * np.median(np.abs(rb - np.median(rb, axis=(1, 2), keepdims=True)), axis=(1, 2))
+    quiet = rms <= 1.5 * rms.min()
+    sigma = float(np.median(rms[quiet]))
+    d = Dendrogram.compute(ib / sigma, min_value=p["min_value"], min_delta=p["min_delta"],
+                           min_npix=max(1, int(round(p["min_beams"] * beam_px / f ** 2))))
+    keep = [st for st in d.trunk if st.get_peak()[1] >= p["peak"]]
+    mb = np.zeros(ib.shape, bool)
+    for st in keep:
+        mb[st.indices(subtree=True)] = True
+    m = np.zeros((nz, ny, nx), np.uint8)
+    m[:, :ny // f * f, :nx // f * f] = np.repeat(np.repeat(mb, f, axis=1), f, axis=2)
+    np.save(os.path.join(run_dir, "dendro_mask.npy"), m)
+    info = dict(params=p, sigma=sigma, sigma_unit="Jy/beam (binned)", bin=f, line_free_channels=int(quiet.sum()),
+                structures=len(keep), trunk=len(d.trunk), fraction=float(m.mean()),
+                channel_fraction=[float(v) for v in m.mean(axis=(1, 2))], seconds=time.time() - t0, created=time.time())
+    with open(os.path.join(run_dir, "dendro_mask.json"), "w") as fh:
+        json.dump(info, fh, indent=1)
+    return info
+
+
+def uv_coverage(ms_list, field, out_path):
+    """The uv plot of a dataset (run by the server in a separate process, see /api/datasets/{id}/uv):
+    _uv_sample of each MS for the imaged field (by name; the target fields if no name), written to
+    out_path as JSON."""
+    import json
+    from casatools import msmetadata
+    sets = []
+    for ms in ms_list:
+        md = msmetadata()
+        md.open(ms)
+        try:
+            ids = md.fieldsforname(field) if field else md.fieldsforintent("OBSERVE_TARGET#ON_SOURCE")
+            ids = [int(i) for i in ids]
+        finally:
+            md.close()
+        sets.append(dict(ms=ms, **_uv_sample(ms, ids)))
+    with open(out_path + ".part", "w") as f:
+        json.dump(dict(sets=sets), f)
+    os.replace(out_path + ".part", out_path)
+
+
+def _uv_sample(ms_path, field_ids, n=12000):
+    """About n baselines' (u, v), in metres, for the uv-coverage plot: target fields, one spectral
+    window (the rows repeat per spw), no autocorrelations, evenly thinned in time."""
+    from casatools import table
+    tb = table()
+    tb.open(ms_path)
+    try:
+        sel = f"FIELD_ID IN [{','.join(str(int(f)) for f in field_ids) or '0'}] && ANTENNA1 != ANTENNA2"
+        # the spw of the first target row: the DATA_DESCRIPTION table may list spws with no data
+        first = tb.query(sel, columns="DATA_DESC_ID")   # row references only: cheap
+        try:
+            if not first.nrows():
+                return dict(u=[], v=[], rows=0)
+            dd = int(first.getcell("DATA_DESC_ID", 0))
+        finally:
+            first.close()
+        q = tb.query(f"{sel} && DATA_DESC_ID == {dd}", columns="UVW")
+        try:
+            nrow = q.nrows()
+            uvw = q.getcol("UVW", 0, -1, max(1, nrow // n)) if nrow else np.zeros((3, 0))
+        finally:
+            q.close()
+    finally:
+        tb.close()
+    return dict(u=np.round(uvw[0], 1).tolist(), v=np.round(uvw[1], 1).tolist(), rows=int(nrow))
 
 
 def _fmt_j2000(ra_rad, dec_rad):
@@ -121,10 +235,14 @@ def image_job(ds_dir, params, q, cancel):
 
     p = params
     q.put(("progress", dict(fraction=None, message="CASA: gridding PSF and dirty cube (tclean niter=0)")))
-    q.put(("log", f"[image] tclean_dirty_cube on {p['ms']} spw={p['spw']} field={p['field']}"))
+    ms_list = p["ms"] if isinstance(p["ms"], list) else [p["ms"]]
+    spw_list = [str(s) for s in p.get("spw_list") or [p["spw"]] * len(ms_list)]
+    for ms, spw in zip(ms_list, spw_list):
+        q.put(("log", f"[image] {ms} spw={spw}"))
+    q.put(("log", f"[image] tclean_dirty_cube on {len(ms_list)} MS, field={p['field']}"))
     t0 = time.time()
     out_dir = os.path.join(ds_dir, "casa")
-    call = dict(ms_list=[p["ms"]], spw_list=[p["spw"]], field=p["field"], phasecenter=p["phasecenter"],
+    call = dict(ms_list=ms_list, spw_list=spw_list, field=p["field"], phasecenter=p["phasecenter"],
                 out_dir=out_dir, imsize=int(p["imsize"]), cell_arcsec=float(p["cell_arcsec"]),
                 start_kms=float(p["start_kms"]), width_kms=float(p["width_kms"]), nchan=int(p["nchan"]),
                 restfreq_ghz=float(p["restfreq_ghz"]), weighting=p.get("weighting", "natural"),
@@ -141,6 +259,96 @@ def image_job(ds_dir, params, q, cancel):
     return dict(shape=list(dirty.shape), psf_shape=list(psf.shape), beam=[bmaj, bmin, bpa])
 
 
+# ======================================================================
+# MS-CLEAN: the method in use, to compare the 2D-1D model against
+# ======================================================================
+MSCLEAN_AUTOMASK = dict(sidelobethreshold=3.0, noisethreshold=5.0, lownoisethreshold=1.5,
+                        negativethreshold=7.0, minbeamfrac=0.3, growiterations=75)
+
+
+def msclean_job(ds_dir, run_dir, params, meta, q, cancel):
+    """Multiscale CLEAN (tclean deconvolver="multiscale"), the recipe of scripts/msclean_cube.py, on the
+    dataset's own visibilities and grid: same MSs, field, spws, phase centre, channels, image size, cell
+    and weighting as its dirty cube, so every pixel and channel lines up (cropped datasets: the crops
+    are applied afterwards, the cleaning itself always sees the full field). Saves model.npy (Jy/pixel),
+    residual.npy, restored.npy = model * the common clean beam (Jy/beam; no residual added) and, when
+    tclean made one, mask.npy (uint8, the clean mask per channel)."""
+    import shutil
+    import casatools
+    from casa_logs import redirect_casa_logs
+    from restore import convolve_with_beam
+
+    redirect_casa_logs(f"gui_msclean_{os.path.basename(ds_dir)}_{os.path.basename(run_dir)}.log")
+    from casatasks import exportfits, tclean
+
+    im, p = meta["imaging"], params
+    ms_list = im["ms"] if isinstance(im["ms"], list) else [im["ms"]]
+    spw_list = [str(s) for s in im.get("spw_list") or [im["spw"]] * len(ms_list)]
+    scales = [int(s) for s in p.get("scales") or [0, 10, 30, 60]]
+    base = os.path.join(run_dir, "_tclean")
+    common = dict(vis=list(ms_list), field=im["field"], spw=spw_list, datacolumn="data", imagename=base,
+                  imsize=int(im["imsize"]), cell=f"{float(im['cell_arcsec'])}arcsec", phasecenter=im["phasecenter"],
+                  specmode="cube", start=f"{float(im['start_kms'])}km/s", width=f"{float(im['width_kms'])}km/s",
+                  nchan=int(im["nchan"]), restfreq=f"{float(im['restfreq_ghz'])}GHz", outframe="LSRK", veltype="radio",
+                  gridder="standard", weighting=im.get("weighting", "natural"), deconvolver="multiscale",
+                  scales=scales, restoringbeam="common", pbcor=False)
+    if p.get("smallscalebias") not in (None, ""):
+        common["smallscalebias"] = float(p["smallscalebias"])
+    mask = p.get("mask") or "auto-multithresh"
+    if mask == "auto-multithresh":
+        common.update(usemask="auto-multithresh",
+                      **{k: type(v)(p[k]) if p.get(k) not in (None, "") else v for k, v in MSCLEAN_AUTOMASK.items()})
+    else:
+        common.update(usemask="user", mask="")
+    q.put(("log", f"[msclean] {len(ms_list)} MS, field {im['field']}, spw {spw_list}, {im['imsize']} px x {im['cell_arcsec']}\", "
+                  f"{im['nchan']} x {im['width_kms']} km/s from {im['start_kms']}, {im.get('weighting', 'natural')}; "
+                  f"scales {scales} px, nsigma {p.get('nsigma', 3)}, niter {p.get('niter', 1000000)}, mask {mask}"))
+    q.put(("progress", dict(fraction=None, message="CASA tclean, multiscale: minor and major cycles (minutes to hours)")))
+    t0 = time.time()
+    rec = tclean(niter=int(p.get("niter") or 1000000), nsigma=float(p.get("nsigma") or 3.0), **common)
+    q.put(("log", f"[msclean] stopcode {rec.get('stopcode')}, {rec.get('iterdone')} iterations, "
+                  f"{rec.get('nmajordone')} major cycles, {time.time() - t0:.0f} s"))
+
+    q.put(("progress", dict(fraction=None, message="exporting model and residual, convolving with the clean beam")))
+    cubes = {}
+    for ext in ("model", "residual"):
+        f = os.path.join(run_dir, f"{ext}.fits")
+        exportfits(imagename=f"{base}.{ext}", fitsimage=f, velocity=True, overwrite=True)
+        cubes[ext] = _read_fits_cube(f).astype(np.float64)
+        os.remove(f)
+    if os.path.isdir(f"{base}.mask"):   # the clean mask (auto-multithresh: one per channel), for like-for-like comparisons
+        f = os.path.join(run_dir, "mask.fits")
+        exportfits(imagename=f"{base}.mask", fitsimage=f, velocity=True, overwrite=True)
+        cubes["mask"] = _read_fits_cube(f) > 0.5
+        os.remove(f)
+    ia = casatools.image()
+    ia.open(f"{base}.image")
+    b = ia.restoringbeam()
+    ia.close()
+    beam = [float(b["major"]["value"]), float(b["minor"]["value"]), float(b["positionangle"]["value"])]
+    if b["major"]["unit"] != "arcsec" or b["minor"]["unit"] != "arcsec":
+        qa = casatools.quanta()
+        beam[:2] = [qa.convert(b["major"], "arcsec")["value"], qa.convert(b["minor"], "arcsec")["value"]]
+    cubes["restored"] = convolve_with_beam(cubes["model"], float(im["cell_arcsec"]), *beam)   # model * clean beam
+    for c in meta.get("crops") or []:   # the dataset's crops, in the order they were made
+        x0, x1, y0, y1 = c["box"]
+        c0, c1 = c.get("chans") or (0, None)
+        for k in cubes:
+            cubes[k] = cubes[k][c0:None if c1 is None else c1 + 1, y0:y1 + 1, x0:x1 + 1]
+    for k, a in cubes.items():
+        np.save(os.path.join(run_dir, f"{k}.npy"), np.ascontiguousarray(a, dtype=np.uint8 if k == "mask" else np.float32))
+    for path in [x for x in os.listdir(run_dir) if x.startswith("_tclean")]:
+        shutil.rmtree(os.path.join(run_dir, path), ignore_errors=True)   # CASA images: large, all kept as .npy
+    rms = cubes["residual"].std(axis=(1, 2))
+    dirty_shape = list(np.load(os.path.join(ds_dir, "dirty.npy"), mmap_mode="r").shape)
+    if list(cubes["model"].shape) != dirty_shape:
+        q.put(("log", f"[warn] MS-CLEAN cube {list(cubes['model'].shape)} does not match the dirty cube {dirty_shape}"))
+    q.put(("log", f"[msclean] common beam {beam[0]:.3f}\" x {beam[1]:.3f}\" @ {beam[2]:.1f} deg; residual rms "
+                  f"{rms.min() * 1e3:.3f}-{rms.max() * 1e3:.3f} mJy/beam; model flux {cubes['model'].sum():.3f} Jy"))
+    return dict(beam=beam, stopcode=rec.get("stopcode"), iterations=rec.get("iterdone"), major_cycles=rec.get("nmajordone"),
+                flux=float(cubes["model"].sum()), residual_rms=[float(rms.min()), float(rms.max())], seconds=time.time() - t0)
+
+
 def _read_fits_cube(path):
     from astropy.io import fits
     with fits.open(path) as h:
@@ -154,6 +362,30 @@ def _read_fits_cube(path):
 # ======================================================================
 # Deconvolution
 # ======================================================================
+MAX_SNAPSHOTS = 1000      # each is a full moment-0 map kept in memory (800 x 800 px: 2.6 MB)
+
+
+def _frame_marks(n_iter, every=None):
+    """Iterations to keep as snapshots: every `every` iterations if given (at most MAX_SNAPSHOTS: `every` is
+    raised if needed), else ~140 log-spaced ones (as the scripts' evolution GIFs: the model changes fastest
+    early on); the first and last iteration always. The live view shows every iteration regardless."""
+    if every:
+        every = max(int(every), -(-n_iter // MAX_SNAPSHOTS))
+        marks = set(range(0, n_iter + 1, max(1, every)))
+    else:
+        marks = set(np.unique(np.geomspace(1, max(n_iter, 1), 140).astype(int)).tolist())
+    return marks | {1, n_iter}
+
+
+def _surface_brightness(meta):
+    """(factor, unit): moment 0 in Jy/pixel km/s -> Jy km/s arcsec^-2 (per pixel when the cell is unknown)"""
+    cell = meta.get("cell_arcsec")
+    v = "km/s" if meta.get("width_kms") else "ch"
+    if cell:
+        return 1.0 / float(cell) ** 2, f"Jy {v} arcsec\u207b\u00b2"
+    return 1.0, f"Jy/pixel {v}"
+
+
 class _WatchedOperator:
     """
     Wraps the fast operator. Both solvers call `operator.gradient(...)`
@@ -162,12 +394,12 @@ class _WatchedOperator:
     cancellation -- without any change to the solver code.
     """
 
-    def __init__(self, op, lipschitz, n_iter, frame_every, dv, q, cancel):
+    def __init__(self, op, lipschitz, n_iter, frame_every, dv, q, cancel, sb=1.0):
         self._op = op
         self.lipschitz = lipschitz
         self.n_iter = n_iter
-        self.frame_every = max(1, int(frame_every))
-        self.dv = dv
+        self.marks = _frame_marks(n_iter, frame_every)
+        self.dv = dv * sb
         self.q = q
         self.cancel = cancel
         self.it = 0
@@ -183,16 +415,16 @@ class _WatchedOperator:
         g = self._op.gradient(x)
         it = self.it
         self.it += 1
-        if it % self.frame_every == 0:
-            m0 = (np.asarray(x).sum(axis=0) * self.dv).astype(np.float32)
-            self.frames.append(m0)
-            self.frame_iters.append(it)
-            self.q.put(("frame", (it, m0)))
+        m0 = (np.asarray(x).sum(axis=0) * self.dv).astype(np.float32)
         el = time.time() - self.t0
         eta = el / max(self.it, 1) * max(self.n_iter - self.it, 0)
+        # live display, every iteration; the progress travels with the frame so the two always agree
+        self.q.put(("frame", (it, m0, dict(fraction=min(self.it / self.n_iter, 1.0),
+                                           message=f"iteration {it}/{self.n_iter}  ({el:.0f} s, ~{eta:.0f} s left)"))))
+        if it in self.marks:
+            self.frames.append(m0)
+            self.frame_iters.append(it)
         self.q.put(("stat", dict(iter=it, residual_rms=float(g.std()), flux=float(np.asarray(x).sum()))))
-        self.q.put(("progress", dict(fraction=min(self.it / self.n_iter, 1.0),
-                                     message=f"iteration {self.it}/{self.n_iter}  ({el:.0f} s, ~{eta:.0f} s left)")))
         return g
 
 
@@ -231,9 +463,8 @@ def deconvolve_job(ds_dir, res_dir, params, meta, q, cancel, device="cpu"):
 
     n_iter = int(p.get("n_iter") or getattr(mod, "N_ITER", 100))
     p["n_iter"] = n_iter
-    if frame_every in (None, "", 0):
-        frame_every = max(1, n_iter // 60)
     dv = abs(float(meta.get("width_kms") or 1.0))
+    sb, sb_unit = _surface_brightness(meta)
 
     if noise_spec:
         p["noise_channels"] = parse_channels(noise_spec, dirty.shape[0])
@@ -243,7 +474,7 @@ def deconvolve_job(ds_dir, res_dir, params, meta, q, cancel, device="cpu"):
         if p.get(k) in ("", None):
             p.pop(k, None)
 
-    op = _WatchedOperator(fast, lip, n_iter, frame_every, dv, q, cancel)
+    op = _WatchedOperator(fast, lip, n_iter, frame_every, dv, q, cancel, sb=sb)
     q.put(("progress", dict(fraction=0.0, message="computing thresholds")))
     kw = _kwargs_for(mod.deconvolve, dict(p, operator=op, verbose=True, log=lambda m: q.put(("log", m))))
     dropped = sorted(set(p) - set(kw) - {"operator"})
@@ -251,11 +482,12 @@ def deconvolve_job(ds_dir, res_dir, params, meta, q, cancel, device="cpu"):
         q.put(("log", f"[warn] {mod.__name__}.deconvolve() does not take: {', '.join(dropped)} (ignored)"))
     x, history = mod.deconvolve(psf, dirty, **kw)
     return _finalize(np.asarray(x, dtype=np.float32), history, op.frames, op.frame_iters, op.it,
-                     dirty, fast, meta, params, dv, res_dir, q, device="cpu")
+                     dirty, fast, meta, params, dv, res_dir, q, device="cpu", sb=(sb, sb_unit))
 
 
-def _finalize(x, history, frames, frame_iters, n_it, dirty, fast, meta, params, dv, res_dir, q, device):
-    """Save model, residual, restored cube, frames, history and the GIF (all solvers)."""
+def _finalize(x, history, frames, frame_iters, n_it, dirty, fast, meta, params, dv, res_dir, q, device, sb=(1.0, "")):
+    """Save model, residual, restored cube, frames, history and the GIF (all solvers). Frames are moment 0
+    in surface brightness (sb = (factor, unit)), at log-spaced iterations unless asked otherwise."""
     q.put(("progress", dict(fraction=1.0, message="saving model, residual, restored cube")))
     np.save(os.path.join(res_dir, "model.npy"), x)
     residual = (dirty - fast.apply(x.astype(np.float64))).astype(np.float32)
@@ -267,12 +499,19 @@ def _finalize(x, history, frames, frame_iters, n_it, dirty, fast, meta, params, 
     if beam and cell:
         from restore import convolve_with_beam
         rb = params.get("restore_beam") or beam
+        if isinstance(rb, str):
+            rb = [float(v) for v in rb.replace(",", " ").split()]
+            if len(rb) == 1:
+                rb = [rb[0], rb[0], 0.0]
+            if len(rb) != 3:
+                raise ValueError("restoring beam: give bmaj, bmin (arcsec) and pa (deg), or one FWHM for a circular beam")
         restored = convolve_with_beam(x, float(cell), *[float(v) for v in rb]).astype(np.float32)
         np.save(os.path.join(res_dir, "restored.npy"), restored)
         restored_beam = [float(v) for v in rb]
 
-    frames = list(frames) + [(x.sum(axis=0) * dv).astype(np.float32)]
-    frame_iters = list(frame_iters) + [n_it - 1]
+    if not frame_iters or frame_iters[-1] != n_it:
+        frames = list(frames) + [(x.sum(axis=0) * dv * sb[0]).astype(np.float32)]
+        frame_iters = list(frame_iters) + [n_it]
     np.save(os.path.join(res_dir, "frames.npy"), np.stack(frames))
     with open(os.path.join(res_dir, "frames.json"), "w") as f:
         json.dump(frame_iters, f)
@@ -280,9 +519,10 @@ def _finalize(x, history, frames, frame_iters, n_it, dirty, fast, meta, params, 
         json.dump(history, f, default=float)
 
     from .render import make_gif
-    make_gif(np.stack(frames), frame_iters, os.path.join(res_dir, "evolution.gif"))
+    q.put(("progress", dict(fraction=1.0, message="rendering the evolution GIF")))
+    make_gif(np.stack(frames), frame_iters, os.path.join(res_dir, "evolution.gif"), unit=sb[1], cell=meta.get("cell_arcsec"))
     q.put(("log", f"[done] {n_it} iterations on {device}, model flux {float(x.sum()):.3f} Jy"))
-    return dict(iterations=n_it, flux=float(x.sum()), restored_beam=restored_beam, device=device)
+    return dict(iterations=n_it, flux=float(x.sum()), restored_beam=restored_beam, device=device, frame_unit=sb[1])
 
 
 def parse_channels(spec, nz):
@@ -427,12 +667,19 @@ def torch_job(ds_dir, res_dir, p, meta, q, cancel, device, algo="pd"):
     if p.get("num_levels_1d") not in (None, "") and int(p["num_levels_1d"]) != L:
         q.put(("log", f"[warn] {nz} channels allow at most {L} CDF 9/7 levels (nz must be a multiple of 2**L)"))
     q.put(("log", f"[setup] {algo} on {device}; cube {d_s.shape}" + (f" after {b}x{b} rebinning" if b > 1 else "") +
-           f", {J} starlet scales x {L} CDF 9/7 levels"))
+           f", {J} spatial scales x {L} CDF 9/7 levels"))
 
     op = G.Op(psf_s, d_s)
-    D = G.Dict2D1D(d_s.shape, J, L)
+    D = G.Dict2D1D(d_s.shape, J, L, dict_2d=p.get("dict_2d") or None)
+    q.put(("log", f"[setup] 2D dictionary {D.dict_2d}: {len(D.plane_scale)} spatial planes"
+                  + ("" if len(D.plane_scale) == J + 1 else f" (vs {J + 1} for the starlet: memory and time scale with it)")))
     k = float(p.get("k_sigma", 3.0))
     noise = parse_channels(p["noise_channels"], nz) if p.get("noise_channels") else []
+    if not noise and not p.get("null_test"):
+        noise = _auto_line_free(G, op.d, J)
+        if noise:
+            q.put(("log", f"[setup] no line-free channels given: detected {_fmt_channels(noise)} "
+                          f"(channels whose large-scale structure is not above the outer channels' level)"))
     q.put(("progress", dict(fraction=None, message="noise model and thresholds")))
     if p.get("null_test"):
         if len(noise) < 2:
@@ -447,6 +694,7 @@ def torch_job(ds_dir, res_dir, p, meta, q, cancel, device, algo="pd"):
     calib = p.get("lambda_calibration") or "noise"
     if len(noise) >= 2:
         lam, _, _, s_pix = G.noise_lambdas(D, op.d, noise, k=k)
+        lam_noise = lam.clone()   # k x the per sub-band noise, before any later change (for the residual support)
         q.put(("log", f"[setup] lambda = {k} x max(real, white) noise MAD per sub-band, from {len(noise)} line-free channels; pixel sigma {s_pix:.3e}"))
         if calib == "dual":
             lam = _dual_lambdas(G, D, op, noise, k, lam, q)
@@ -457,6 +705,10 @@ def torch_job(ds_dir, res_dir, p, meta, q, cancel, device, algo="pd"):
         lam = k * D.band_mad(D.W(white))
         q.put(("log", "[warn] no line-free channels given: thresholds from WHITE noise only, which "
                       "underestimates the correlated interferometric noise (set line-free channels)"))
+    if p.get("coarse_lambda_scale") not in (None, ""):   # optional: scale the coarsest spatial plane's thresholds
+        lam = lam.clone()
+        lam[-1] = lam[-1] * float(p["coarse_lambda_scale"])
+        q.put(("log", f"[setup] coarse-plane thresholds x {float(p['coarse_lambda_scale']):g}"))
     beta = G.field_lipschitz(op)
 
     n_iter = int(p.get("n_iter") or 5000)
@@ -464,8 +716,22 @@ def torch_job(ds_dir, res_dir, p, meta, q, cancel, device, algo="pd"):
     reweight = None
     if p.get("reweight"):
         reweight = dict(start=int(p.get("burn_in_iters") or n_iter // 3), every=int(p.get("reweight_every") or 1000),
-                        eps=float(p.get("reweight_eps") or 1.0))
-    frame_every = int(p.get("frame_every") or max(1, n_iter // 60))
+                        eps=float(p.get("reweight_eps") or 1.0),
+                        # a scaled (e.g. zero) coarse threshold is a deliberate choice: reweighting must not change it
+                        # (and dividing by a zero threshold would give 0/0)
+                        keep_coarse=bool(p.get("reweight_keep_coarse")) or p.get("coarse_lambda_scale") not in (None, ""))
+        if algo == "pd" and (p.get("reweight_ref") or "tau_lambda") == "tau_lambda":
+            # pdtau: compare |W x| with the threshold in MODEL units, tau * lambda (FISTA's T0); with the default
+            # reference lambda (gradient units) the ratio is beta ~ 1e3 times too small and reweighting does nothing
+            reweight["ref"] = lam / beta
+        q.put(("log", f"[setup] reweighting every {reweight['every']} iterations from {reweight['start']}, eps {reweight['eps']:g}"
+                      + (", reference tau*lambda (pdtau)" if "ref" in reweight else ", reference lambda" if algo == "pd" else "")))
+    marks = _frame_marks(n_iter, p.get("frame_every"))
+    if p.get("frame_every") and len(marks) < n_iter // max(1, int(p["frame_every"])):
+        q.put(("log", f"[warn] snapshot every {p['frame_every']} would keep {n_iter // int(p['frame_every'])} full maps in "
+                      f"memory: keeping at most {MAX_SNAPSHOTS} (every {-(-n_iter // MAX_SNAPSHOTS)}); the live view still "
+                      f"shows every iteration"))
+    sb, sb_unit = _surface_brightness(meta)
     stat_every = max(1, n_iter // 400)
     hist_every = max(1, n_iter // 200)
     dv = abs(float(meta.get("width_kms") or 1.0))
@@ -478,14 +744,17 @@ def torch_job(ds_dir, res_dir, p, meta, q, cancel, device, algo="pd"):
         if cancel.is_set():
             raise Cancelled()
         st["x"], st["it"] = x, it
-        if it % frame_every == 0 or it == 1:
-            m0 = (x.sum(0) * dv).float().cpu().numpy()
-            if b > 1:
-                m0 = G.upsample(m0[None], b)[0]
-            m0 = m0.astype(np.float32)
+        m0 = (x.sum(0) * (dv * sb)).float().cpu().numpy()     # moment 0, surface brightness
+        if b > 1:
+            m0 = G.upsample(m0[None], b)[0]
+        m0 = m0.astype(np.float32)
+        el = time.time() - t0
+        # live display, every iteration; the progress travels with the frame so the two always agree
+        q.put(("frame", (it, m0, dict(fraction=it / n_iter, message=f"iteration {it}/{n_iter} on {device}  "
+                                                                    f"({el:.0f} s, ~{el / max(it, 1) * (n_iter - it):.0f} s left)"))))
+        if it in marks:
             frames.append(m0)
             frame_iters.append(it)
-            q.put(("frame", (it, m0)))
         if it % stat_every == 0:
             q.put(("stat", dict(iter=it, residual_rms=float(g.std()), flux=float(x.sum()))))
         # relative change per iteration, measured between iterations it-1 and it
@@ -499,19 +768,39 @@ def torch_job(ds_dir, res_dir, p, meta, q, cancel, device, algo="pd"):
                 raise _Converged()
         if (it + 1) % hist_every == 0:
             st["prev"] = x.clone()
-        now = time.time()
-        if now - st["last"] > 0.5 or it == n_iter:
-            st["last"] = now
-            el = now - t0
-            q.put(("progress", dict(fraction=it / n_iter,
-                                    message=f"iteration {it}/{n_iter} on {device}  ({el:.0f} s, ~{el / it * (n_iter - it):.0f} s left)")))
 
+    # optional: the model's dirty-beam image must also reproduce the dirty cube's integral over the field, per channel
+    # (weight kappa: mu = kappa beta / max |N 1|^2, so kappa = 1 weighs it like the strongest mode of N)
+    sup = None   # optional emission mask (.npy, the cube's grid): the model is zero outside it
+    if algo == "pd" and p.get("support_npy"):
+        m_ = np.load(p["support_npy"]).astype(bool)
+        if b > 1:   # a solve-grid pixel is inside if any of its b x b pixels is
+            m_ = m_.reshape(m_.shape[0], m_.shape[1] // b, b, m_.shape[2] // b, b).any(axis=(2, 4))
+        sup = torch.tensor(m_, device=G.DEV, dtype=G.DT)
+        q.put(("log", f"[setup] support mask {os.path.basename(p['support_npy'])}: {100 * m_.mean():.1f}% of the cube"))
+    mrs = None   # optional multiresolution support on the residual (Starck): "residual" (every iteration) or "fixed" (dirty)
+    if algo == "pd" and p.get("mrs_mode") in ("residual", "fixed"):
+        kk = float(p.get("mrs_k") or 3.0)
+        sigma_b = lam_noise / k                                    # per sub-band noise, from the noise model
+        mrs = dict(sigma=sigma_b, k=kk)
+        if p["mrs_mode"] == "fixed":
+            mrs["fixed"] = (D.W(op.d).abs() >= kk * sigma_b).to(G.DT)
+            q.put(("log", f"[setup] multiresolution support (fixed, from the dirty cube) at {kk:g} sigma: "
+                          f"{100 * float(mrs['fixed'].mean()):.1f}% of the coefficients"))
+        else:
+            q.put(("log", f"[setup] multiresolution support from the residual, every iteration, at {kk:g} sigma"))
+    fm, beta_pd = None, beta
+    if algo == "pd" and p.get("field_integral_weight") not in (None, "", 0, "0"):
+        a1 = op.apply(torch.ones_like(op.d))
+        an = float((a1 ** 2).sum(dim=(1, 2)).max())
+        fm = dict(a=a1, mu=float(p["field_integral_weight"]) * beta / an)
+        beta_pd = beta + fm["mu"] * an
+        q.put(("log", f"[setup] field-integral constraint, weight {float(p['field_integral_weight']):g} (step {beta / beta_pd:.3f} x the usual)"))
     q.put(("progress", dict(fraction=0.0, message=f"iterating on {device}")))
     try:
         if algo == "pd":
-            x, _, _, _ = G.solve_pd(op, D, lam, n_iter=n_iter, beta=beta, reweight=reweight,
-                                    dirac=float(p.get("dirac") or 0.0), print_every=10 ** 9,
-                                    log=lambda m: None, callback=cb)
+            x, _, _, _ = G.solve_pd(op, D, lam, n_iter=n_iter, beta=beta_pd, reweight=reweight, print_every=10 ** 9,
+                                    log=lambda m: None, callback=cb, flux_match=fm, support=sup, mrs=mrs)
         else:
             x = _torch_fista(G, torch, op, D, lam, beta, n_iter, reweight, cb)
         n_done = n_iter
@@ -523,7 +812,37 @@ def torch_job(ds_dir, res_dir, p, meta, q, cancel, device, algo="pd"):
         x = G.upsample(x, b)
     fast = ShiftInvariantOperator(psf, dirty)
     return _finalize(x.astype(np.float32), history, frames, frame_iters, n_done, dirty, fast, meta,
-                     dict(p), dv, res_dir, q, device=device)
+                     dict(p), dv, res_dir, q, device=device, sb=(sb, sb_unit))
+
+
+def _auto_line_free(G, d, J):
+    """Line-free channels found from the dirty cube alone (scripts/experiments/common.auto_line_channels):
+    per-channel std of the large-scale starlet planes, continuum (median of the outer 3 + 3 channels)
+    removed; a channel is 'line' if > 3x the median of the outer channels' values, padded by 1 channel.
+    Returns [] when the cube is too short or nothing is left."""
+    nz = d.shape[0]
+    if nz < 10:
+        return []
+    outer = [0, 1, 2, nz - 3, nz - 2, nz - 1]
+    dd = d - d[outer].median(0).values
+    j0 = min(4, J - 1)
+    pl = G.starlet(dd, J)
+    s = np.array([float(pl[j0:J, c].std()) for c in range(nz)])
+    ref = np.median(s[outer])
+    line = np.where(s > 3 * ref)[0]
+    line = {int(c) for i in line for c in (i - 1, i, i + 1) if 0 <= c < nz}
+    free = [c for c in range(nz) if c not in line]
+    return free if len(free) >= 2 else []
+
+
+def _fmt_channels(ch):
+    """[0, 1, 2, 24, 25] -> '0-2, 24-25'"""
+    out, start = [], ch[0]
+    for a, b in zip(ch, ch[1:] + [None]):
+        if b != a + 1:
+            out.append(f"{start}-{a}" if a > start else f"{a}")
+            start = b
+    return ", ".join(out)
 
 
 def _dual_lambdas(G, D, op, noise, k, lam_noise, q, seed=7, max_cg=300):
@@ -555,7 +874,8 @@ def _dual_lambdas(G, D, op, noise, k, lam_noise, q, seed=7, max_cg=300):
         pdir = r + (rn / rs) * pdir
         rs = rn
     lam = torch.maximum(k * D.band_mad(D.W(x)), lam_noise)
-    ratio = [round(float((lam[j] / lam_noise[j]).median()), 2) for j in range(lam.shape[0])]
+    sc = torch.tensor(D.plane_scale, device=lam.device)
+    ratio = [round(float((lam[sc == j] / lam_noise[sc == j]).median()), 2) for j in range(D.J + 1)]
     q.put(("log", f"[setup] dual-certificate calibration ({i + 1} CG steps, residual {np.sqrt(rn / nn):.1e}): "
                   f"lambda / noise-coefficient lambda per spatial scale (median over bands) = {ratio}"))
     return lam

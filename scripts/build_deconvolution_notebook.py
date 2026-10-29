@@ -127,17 +127,17 @@ GALAXIES = [
         label="NGC 3110", key="ngc3110", field="ngc3110",
         line_kms=(4780.0, 5180.0),          # CO(2-1) window: channels outside are line-free
         configs=dict(
-            extended=[f"{VIS_ROOT}/gal1/NGC3110_12m_extended_X1371/uid___A002_Xc7cf4e_X7866.ms.split.cal"],
-            compact=[f"{VIS_ROOT}/gal1/NGC3110_12m_compact_X1373/uid___A002_Xcf92df_X4e8e.ms.split.cal",
-                     f"{VIS_ROOT}/gal1/NGC3110_12m_compact_X1373/uid___A002_Xd09670_X3f8d.ms.split.cal"],
+            extended=[f"{VIS_ROOT}/NGC3110/extended/uid___A002_Xc7cf4e_X7866.ms.split.cal"],
+            compact=[f"{VIS_ROOT}/NGC3110/compact/uid___A002_Xcf92df_X4e8e.ms.split.cal",
+                     f"{VIS_ROOT}/NGC3110/compact/uid___A002_Xd09670_X3f8d.ms.split.cal"],
         ),
     ),
     dict(
         label="NGC 2369", key="ngc2369", field="ngc2369",
         line_kms=(2950.0, 3520.0),
         configs=dict(
-            extended=[f"{VIS_ROOT}/gal2/NGC2369_12m_extended_X136b/uid___A002_Xc845c0_X1710.ms.split.cal"],
-            compact=[f"{VIS_ROOT}/gal2/NGC2369_12m_compact_X136d/uid___A002_Xcd07af_X20e.ms.split.cal"],
+            extended=[f"{VIS_ROOT}/NGC2369/extended/uid___A002_Xc845c0_X1710.ms.split.cal"],
+            compact=[f"{VIS_ROOT}/NGC2369/compact/uid___A002_Xcd07af_X20e.ms.split.cal"],
         ),
     ),
 ]

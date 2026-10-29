@@ -4,7 +4,7 @@
 set -euo pipefail
 
 BASE="https://almascience.eso.org/arcdistribution/mydir/c180aca4bcab079378743c39151c1f7d"
-DEST="/nas/datasets/ALMA_visibilities/gal1/NGC3110_12m_compact_X1373"
+DEST="/nas/datasets/ALMA_visibilities/NGC3110/compact"
 MS_TGZ=(uid___A002_Xcf92df_X4e8e.ms.split.cal.tgz uid___A002_Xd09670_X3f8d.ms.split.cal.tgz)
 
 mkdir -p "$DEST"

@@ -5,6 +5,7 @@ Per source: recovered flux (r < 0.6"), FWHM of a 2D Gaussian fit, peak offset, f
 flux in the brightest pixel, and the point-source transfer function T(k) = |FT(response)| / flux.
 
     python scripts/experiments/analyze_injection.py -> data/experiments/10_point_injection/results.json
+    (REF=, INJECTED=, RESULTS= override the two models and the output, e.g. for another solver)
 """
 import json
 import os
@@ -14,12 +15,14 @@ from scipy.optimize import curve_fit
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 E = os.path.join(REPO, "data/experiments/10_point_injection")
-REF = os.path.join(REPO, "data/experiments/04_pd_tau_reweighting/compact/pdtau_k5.npy")
+REF = os.environ.get("REF", os.path.join(REPO, "data/experiments/04_pd_tau_reweighting/compact/pdtau_k5.npy"))      # model(data)
+INJECTED = os.environ.get("INJECTED", os.path.join(E, "pdtau_k5_injected.npy"))                                      # model(data + injected)
+RESULTS = os.environ.get("RESULTS", os.path.join(E, "results.json"))
 vel = 5073.9 + 25.0 * (np.arange(32) - 15.5)
 L = [i for i, v in enumerate(vel) if 4750 <= v <= 5280]
 C, H = 0.04, 16                                                     # solve-grid cell, cutout half-size [px]
 m0 = lambda p: (np.load(p).astype(np.float64)[L].sum(0) * 25.0).reshape(400, 2, 400, 2).sum((1, 3))
-resp = m0(os.path.join(E, "pdtau_k5_injected.npy")) - m0(REF)
+resp = m0(INJECTED) - m0(REF)
 src = json.load(open(os.path.join(E, "sources.json")))["sources"]
 y, x = np.indices((2 * H + 1, 2 * H + 1)) - H
 r = np.hypot(x, y) * C
@@ -51,4 +54,4 @@ for s in src:
     print(f"S/N {s['snr_peak_channel']:5d}: flux ratio {o['flux_ratio']:5.2f}  FWHM {o['fwhm_geo']:.3f}\" "
           f"({fw[0]:.3f} x {fw[1]:.3f})  offset {off * 1000:5.1f} mas  peak-pixel fraction {o['peak_pixel_frac']:.2f}  "
           f"T(k=5) {T[8]:.2f}")
-json.dump(dict(k_bins=kb.tolist(), cell=C, sources=out), open(os.path.join(E, "results.json"), "w"), indent=1)
+json.dump(dict(k_bins=kb.tolist(), cell=C, sources=out), open(RESULTS, "w"), indent=1)

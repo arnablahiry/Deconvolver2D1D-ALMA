@@ -8,6 +8,7 @@ __pycache__/
 data/*
 !data/prep_wavelet_data.py
 *.npz
+!dictionaries/*.npz
 *.npy
 *.fits
 # macOS
@@ -33,6 +34,7 @@ logs/
 *.png
 *.pdf
 *.gif
+!gui/deconvgui/static/*.png
 
 # CASA scratch lattices (~1 GB each) left behind in the working directory
 TempLattice*/

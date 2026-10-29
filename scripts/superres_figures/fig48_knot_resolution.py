@@ -20,7 +20,7 @@ from matplotlib.colors import Normalize
 from astropy.io import fits
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RES = json.load(open(os.path.join(REPO, "data/experiments/09_knot_resolution/knot_resolution.json")))
+RES = json.load(open(os.environ.get("KNOT_RES", os.path.join(REPO, "data/experiments/09_knot_resolution/knot_resolution.json"))))
 OUT = os.environ.get("OUT", os.path.join(REPO, "figures/experiments/04_pd_tau_reweighting/5_sigma/48_knot_resolution_compact.png"))
 LABEL = os.environ.get("LABEL", r"compact model: primal-dual ($\tau\lambda$ reweighting), k = 5, 20,000 iterations")
 D = os.path.join(REPO, "data/ngc3110")

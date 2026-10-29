@@ -2,7 +2,7 @@
 """
 Builds and executes notebooks/alma_visibility_inspection.ipynb: a quick-look
 at the two real ALMA datasets under /nas/datasets/ALMA_visibilities -- NGC 3110
-(gal1) and NGC 2369 (gal2), project 2017.1.00255.S -- shown side by side as
+and NGC 2369, project 2017.1.00255.S -- shown side by side as
 subplots throughout.
 
 For each galaxy: the (u, v) coverage of the calibrated visibilities, then the
@@ -126,9 +126,9 @@ GALAXIES = [
         key="ngc3110",
         field="ngc3110",
         configs=dict(
-            extended=[f"{VIS_ROOT}/gal1/NGC3110_12m_extended_X1371/uid___A002_Xc7cf4e_X7866.ms.split.cal"],
-            compact=[f"{VIS_ROOT}/gal1/NGC3110_12m_compact_X1373/uid___A002_Xcf92df_X4e8e.ms.split.cal",
-                     f"{VIS_ROOT}/gal1/NGC3110_12m_compact_X1373/uid___A002_Xd09670_X3f8d.ms.split.cal"],
+            extended=[f"{VIS_ROOT}/NGC3110/extended/uid___A002_Xc7cf4e_X7866.ms.split.cal"],
+            compact=[f"{VIS_ROOT}/NGC3110/compact/uid___A002_Xcf92df_X4e8e.ms.split.cal",
+                     f"{VIS_ROOT}/NGC3110/compact/uid___A002_Xd09670_X3f8d.ms.split.cal"],
         ),
     ),
     dict(
@@ -136,8 +136,8 @@ GALAXIES = [
         key="ngc2369",
         field="ngc2369",
         configs=dict(
-            extended=[f"{VIS_ROOT}/gal2/NGC2369_12m_extended_X136b/uid___A002_Xc845c0_X1710.ms.split.cal"],
-            compact=[f"{VIS_ROOT}/gal2/NGC2369_12m_compact_X136d/uid___A002_Xcd07af_X20e.ms.split.cal"],
+            extended=[f"{VIS_ROOT}/NGC2369/extended/uid___A002_Xc845c0_X1710.ms.split.cal"],
+            compact=[f"{VIS_ROOT}/NGC2369/compact/uid___A002_Xcd07af_X20e.ms.split.cal"],
         ),
     ),
 ]

@@ -29,12 +29,12 @@ from casa_logs import redirect_casa_logs
 VIS_ROOT = "/nas/datasets/ALMA_visibilities"
 GALAXIES = dict(
     ngc3110=dict(field="ngc3110", configs=dict(
-        extended=[f"{VIS_ROOT}/gal1/NGC3110_12m_extended_X1371/uid___A002_Xc7cf4e_X7866.ms.split.cal"],
-        compact=[f"{VIS_ROOT}/gal1/NGC3110_12m_compact_X1373/uid___A002_Xcf92df_X4e8e.ms.split.cal",
-                 f"{VIS_ROOT}/gal1/NGC3110_12m_compact_X1373/uid___A002_Xd09670_X3f8d.ms.split.cal"])),
+        extended=[f"{VIS_ROOT}/NGC3110/extended/uid___A002_Xc7cf4e_X7866.ms.split.cal"],
+        compact=[f"{VIS_ROOT}/NGC3110/compact/uid___A002_Xcf92df_X4e8e.ms.split.cal",
+                 f"{VIS_ROOT}/NGC3110/compact/uid___A002_Xd09670_X3f8d.ms.split.cal"])),
     ngc2369=dict(field="ngc2369", configs=dict(
-        extended=[f"{VIS_ROOT}/gal2/NGC2369_12m_extended_X136b/uid___A002_Xc845c0_X1710.ms.split.cal"],
-        compact=[f"{VIS_ROOT}/gal2/NGC2369_12m_compact_X136d/uid___A002_Xcd07af_X20e.ms.split.cal"])),
+        extended=[f"{VIS_ROOT}/NGC2369/extended/uid___A002_Xc845c0_X1710.ms.split.cal"],
+        compact=[f"{VIS_ROOT}/NGC2369/compact/uid___A002_Xcd07af_X20e.ms.split.cal"])),
 )
 
 # Grid of the notebook's dirty cubes.
@@ -97,14 +97,22 @@ def main():
     ap.add_argument("--scales", type=int, nargs="+", default=SCALES_PX, help="pixels")
     ap.add_argument("--nsigma", type=float, default=NSIGMA)
     ap.add_argument("--niter", type=int, default=1_000_000)
+    ap.add_argument("--out-name", default="ms_clean", help="output folder under data/<galaxy>/<config>/")
+    for k, v in AUTOMASK.items():
+        ap.add_argument(f"--{k}", type=type(v), default=v, help="auto-multithresh parameter")
+    ap.add_argument("--smallscalebias", type=float, default=None)
+    ap.add_argument("--nomask", action="store_true", help="no clean mask: components allowed anywhere")
+    ap.add_argument("--usermask", help=".npy (nchan, ny, nx) boolean mask on the cube grid: replaces auto-multithresh")
     args = ap.parse_args()
+    automask = {k: getattr(args, k) for k in AUTOMASK}
 
     import casatools
     from casatasks import tclean, exportfits
 
     g = GALAXIES[args.galaxy]
     paths = g["configs"][args.config]
-    redirect_casa_logs(f"msclean_{args.galaxy}_{args.config}.log")
+    redirect_casa_logs(f"msclean_{args.galaxy}_{args.config}"
+                       + ("" if args.out_name == "ms_clean" else f"_{args.out_name}") + ".log")
 
     # Both configurations use the extended MS's phase centre and v_sys, as in the notebook.
     ref = g["configs"]["extended"][0]
@@ -113,22 +121,43 @@ def main():
     start = vsys - (NCHAN - 1) / 2 * WIDTH_KMS
     spws = [str(line_setup(p, g["field"])[0]) for p in paths]
 
-    out = os.path.join(REPO_ROOT, "data", args.galaxy, args.config, "ms_clean")
+    out = os.path.join(REPO_ROOT, "data", args.galaxy, args.config, args.out_name)
     os.makedirs(out, exist_ok=True)
     base = os.path.join(out, "_tclean")
     for p in glob.glob(base + ".*"):
         shutil.rmtree(p)
     print(f"{args.galaxy} {args.config}: {len(paths)} MS, spw {spws}, phase centre {phasecenter}, "
-          f"start {start:.1f} km/s, scales {args.scales} px, nsigma {args.nsigma}", flush=True)
+          f"start {start:.1f} km/s, scales {args.scales} px, nsigma {args.nsigma}, "
+          f"{'user mask ' + args.usermask if args.usermask else 'no mask' if args.nomask else 'auto-multithresh ' + str(automask)}, "
+          f"smallscalebias {args.smallscalebias}", flush=True)
 
-    rec = tclean(vis=list(paths), field=g["field"], spw=spws, datacolumn="data",
-                 imagename=base, imsize=IMSIZE, cell=f"{CELL_ARCSEC}arcsec",
-                 phasecenter=phasecenter, specmode="cube", start=f"{start}km/s",
-                 width=f"{WIDTH_KMS}km/s", nchan=NCHAN, restfreq=f"{RESTFREQ_GHZ}GHz",
-                 outframe="LSRK", veltype="radio", gridder="standard", weighting=WEIGHTING,
-                 deconvolver="multiscale", scales=list(args.scales), niter=args.niter,
-                 nsigma=args.nsigma, usemask="auto-multithresh", **AUTOMASK,
-                 restoringbeam="common", pbcor=False, fullsummary=True)
+    common = dict(vis=list(paths), field=g["field"], spw=spws, datacolumn="data",
+                  imagename=base, imsize=IMSIZE, cell=f"{CELL_ARCSEC}arcsec",
+                  phasecenter=phasecenter, specmode="cube", start=f"{start}km/s",
+                  width=f"{WIDTH_KMS}km/s", nchan=NCHAN, restfreq=f"{RESTFREQ_GHZ}GHz",
+                  outframe="LSRK", veltype="radio", gridder="standard", weighting=WEIGHTING,
+                  deconvolver="multiscale", scales=list(args.scales),
+                  restoringbeam="common", pbcor=False, fullsummary=True)
+    if args.smallscalebias is not None:
+        common["smallscalebias"] = args.smallscalebias
+    if args.usermask:
+        # dirty imaging first (niter = 0) to get the image grid, then the mask as a CASA image on it
+        tclean(niter=0, **common)
+        ia = casatools.image()
+        ia.open(f"{base}.residual")
+        cs, shape = ia.coordsys(), ia.shape()
+        ia.close()
+        m = np.load(args.usermask).astype(np.float32)               # (nchan, ny, nx), FITS order
+        m = m.transpose(2, 1, 0)[:, :, None, :]                     # CASA (x, y, stokes, chan)
+        assert tuple(m.shape) == tuple(shape), (m.shape, shape)
+        ia.fromarray(outfile=f"{base}.usermask", pixels=m, csys=cs.torecord(), overwrite=True)
+        ia.close()
+        rec = tclean(niter=args.niter, nsigma=args.nsigma, usemask="user", mask=f"{base}.usermask",
+                     calcpsf=False, calcres=False, **common)
+    elif args.nomask:
+        rec = tclean(niter=args.niter, nsigma=args.nsigma, usemask="user", mask="", **common)
+    else:
+        rec = tclean(niter=args.niter, nsigma=args.nsigma, usemask="auto-multithresh", **automask, **common)
     print(f"stopcode {rec.get('stopcode')}, {rec.get('iterdone')} iterations, "
           f"{rec.get('nmajordone')} major cycles", flush=True)
 

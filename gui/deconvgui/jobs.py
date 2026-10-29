@@ -35,6 +35,7 @@ class Job:
         self.log = deque(maxlen=400)
         self.stats = []                 # per-iteration diagnostics (deconvolve)
         self.frame = None               # latest moment-0 frame (float32 2D)
+        self.live = None                # (iteration, frame, fraction, message), replaced as one unit
         self.frame_iter = -1
         self.frame_seq = 0
         self.result = None
@@ -137,7 +138,11 @@ class JobManager:
             elif kind == "stat":
                 job.stats.append(payload)
             elif kind == "frame":
-                job.frame_iter, job.frame = payload
+                it, frame, prog = payload if len(payload) == 3 else (*payload, None)
+                if prog:   # the progress of this very iteration
+                    job.fraction, job.message = prog.get("fraction"), prog.get("message", job.message)
+                job.live = (it, frame, job.fraction, job.message)
+                job.frame_iter, job.frame = it, frame
                 job.frame_seq += 1
             elif kind in ("result", "error", "cancelled"):
                 job.status = {"result": "done", "error": "error", "cancelled": "cancelled"}[kind]

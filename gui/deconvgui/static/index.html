@@ -4,21 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Deconvolver 2D1D</title>
+<link rel="preload" href="/static/abaddon-light.ttf" as="font" type="font/ttf" crossorigin>
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+<div class="sky" aria-hidden="true"><div class="sky-pan"><div></div><div class="sharp"></div></div></div>
+
 <header class="topbar">
-  <div class="brand">Deconvolver <span>2D1D</span></div>
-  <div id="repo" class="repo" title="Repository version (read-only)"></div>
-  <div class="spacer"></div>
   <div id="jobs-indicator" class="jobs-indicator" hidden></div>
-  <button id="theme-btn" class="ghost" title="Switch light/dark theme">Theme</button>
+  <div class="top-actions">
+    <button type="button" class="icon-btn" id="prefs-btn" aria-label="Preferences" title="Preferences"></button>
+    <button type="button" class="theme" id="theme-btn" aria-label="Switch colour theme"></button>
+  </div>
+  <h1 class="brand">
+    <img class="logo logo-light" src="/static/logo-light.png" alt="IFU Deconvolver 2D1D" width="2180" height="144">
+    <img class="logo logo-dark" src="/static/logo-dark.png" alt="IFU Deconvolver 2D1D" width="2180" height="144">
+  </h1>
+  <div id="repo" class="repo" title="Repository version (read-only)"></div>
 </header>
 
 <div class="layout">
   <aside class="sidebar">
     <div class="side-actions">
       <button id="new-ms" class="primary">Load MS</button>
+      <button id="load-saved" class="primary" title="A .pkl written by Save on disk">Load saved data</button>
       <button id="new-import">Import cubes</button>
       <button id="new-toy" title="A synthetic rotating disc, no CASA needed">Synthetic example</button>
     </div>
@@ -39,6 +48,14 @@
     </section>
   </main>
 </div>
+
+<footer class="credit">
+  <span class="made">Made with <svg class="heart" viewBox="0 0 7 6" role="img" aria-label="love"><path d="M1 0h1v1h-1zM2 0h1v1h-1zM4 0h1v1h-1zM5 0h1v1h-1zM0 1h1v1h-1zM1 1h1v1h-1zM2 1h1v1h-1zM3 1h1v1h-1zM4 1h1v1h-1zM5 1h1v1h-1zM6 1h1v1h-1zM0 2h1v1h-1zM1 2h1v1h-1zM2 2h1v1h-1zM3 2h1v1h-1zM4 2h1v1h-1zM5 2h1v1h-1zM6 2h1v1h-1zM1 3h1v1h-1zM2 3h1v1h-1zM3 3h1v1h-1zM4 3h1v1h-1zM5 3h1v1h-1zM2 4h1v1h-1zM3 4h1v1h-1zM4 4h1v1h-1zM3 5h1v1h-1z"/></svg> by</span>
+  <a class="me" href="https://arnablahiry.github.io/" target="_blank" rel="noopener">
+    <img class="avatar" src="/static/arnab.jpg" alt="" onerror="this.hidden=true">
+    <span>Arnab Lahiry</span>
+  </a>
+</footer>
 
 <template id="tpl-browser">
   <div class="browser">
